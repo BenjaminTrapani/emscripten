@@ -1015,7 +1015,7 @@ class benchmark(RunnerCore):
       ''' % DEFAULT_ARG)
 
     def lib_builder(name, native, env_init):
-      return [get_poppler_library(self)]
+      return get_poppler_library(self)
 
     # TODO: poppler in native build
     self.do_benchmark('poppler', '', 'hashed printout',
