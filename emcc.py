@@ -945,9 +945,6 @@ There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR P
     if options.separate_asm:
       shared.Settings.SEPARATE_ASM = shared.JS.get_subresource_location(asm_target)
 
-    if 'EMCC_STRICT' in os.environ:
-      shared.Settings.STRICT = os.environ.get('EMCC_STRICT') != '0'
-
     # Libraries are searched before settings_changes are applied, so apply the value for STRICT and ERROR_ON_MISSING_LIBRARIES from
     # command line already now.
 

@@ -9102,3 +9102,16 @@ int main () {
 
     run_process([PYTHON, EMCC, '-s', 'MEMFS_APPEND_TO_TYPED_ARRAYS=1', path_from_root('tests', 'hello_world.c')])
     run_process([PYTHON, EMCC, '-s', 'PRECISE_I64_MATH=2', path_from_root('tests', 'hello_world.c')])
+
+  def test_legacy_settings_strict_mode(self):
+    cmd = [PYTHON, EMCC, path_from_root('tests', 'hello_world.c'), '-s', 'ASM_JS']
+    run_process(cmd)
+
+    with env_modify({'EMCC_STRICT': '1'}):
+      proc = run_process(cmd, stderr=PIPE, check=False)
+      self.assertNotEqual(proc.returncode, 0)
+      self.assertContained('legacy setting used in strict mode: ASM_JS', proc.stderr)
+
+    proc = run_process(cmd + ['-s', 'STRICT=1'], stderr=PIPE, check=False)
+    self.assertNotEqual(proc.returncode, 0)
+    self.assertContained('legacy setting used in strict mode: ASM_JS', proc.stderr)
