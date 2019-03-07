@@ -64,6 +64,7 @@ var LibraryManager = {
   },
 
   load: function() {
+	  console.log("Loading emscripten web assembly (Ben added this to debug...)");
     if (this.library) return;
 
     // Core system libraries (always linked against)
