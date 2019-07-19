@@ -171,8 +171,6 @@ Module['callMain'] = function callMain(args) {
 
   args = args || [];
 
-  ensureInitRuntime();
-
   var argc = args.length+1;
   var argv = stackAlloc((argc + 1) * {{{ Runtime.POINTER_SIZE }}});
   HEAP32[argv >> 2] = allocateUTF8OnStack(Module['thisProgram']);
@@ -202,16 +200,16 @@ Module['callMain'] = function callMain(args) {
     Module.realPrint('main() took ' + (Date.now() - start) + ' milliseconds');
 #endif
 
-#if EMTERPRETIFY_ASYNC
+#if EMTERPRETIFY_ASYNC || (WASM_BACKEND && ASYNCIFY)
     // if we are saving the stack, then do not call exit, we are not
     // really exiting now, just unwinding the JS stack
-    if (typeof EmterpreterAsync === 'object' && EmterpreterAsync.state !== 1) {
-#endif // EMTERPRETIFY_ASYNC
+    if (!Module['noExitRuntime']) {
+#endif // EMTERPRETIFY_ASYNC || (WASM_BACKEND && ASYNCIFY)
     // if we're not running an evented main loop, it's time to exit
       exit(ret, /* implicit = */ true);
-#if EMTERPRETIFY_ASYNC
+#if EMTERPRETIFY_ASYNC || (WASM_BACKEND && ASYNCIFY)
     }
-#endif // EMTERPRETIFY_ASYNC
+#endif // EMTERPRETIFY_ASYNC || (WASM_BACKEND && ASYNCIFY)
   }
   catch(e) {
     if (e instanceof ExitStatus) {
@@ -268,7 +266,7 @@ function run(args) {
 
     if (ABORT) return;
 
-    ensureInitRuntime();
+    initRuntime();
 
     preMain();
 
@@ -313,7 +311,7 @@ function checkUnflushedContent() {
   // builds we do so just for this check, and here we see if there is any
   // content to flush, that is, we check if there would have been
   // something a non-ASSERTIONS build would have not seen.
-  // How we flush the streams depends on whether we are in FILESYSTEM=0
+  // How we flush the streams depends on whether we are in SYSCALLS_REQUIRE_FILESYSTEM=0
   // mode (which has its own special function for this; otherwise, all
   // the code is inside libc)
   var print = out;
@@ -323,34 +321,31 @@ function checkUnflushedContent() {
     has = true;
   }
   try { // it doesn't matter if it fails
-#if FILESYSTEM == 0
+#if SYSCALLS_REQUIRE_FILESYSTEM == 0
     var flush = {{{ '$flush_NO_FILESYSTEM' in addedLibraryItems ? 'flush_NO_FILESYSTEM' : 'null' }}};
 #else
     var flush = Module['_fflush'];
 #endif
     if (flush) flush(0);
-#if FILESYSTEM
+#if '$FS' in addedLibraryItems && '$TTY' in addedLibraryItems
     // also flush in the JS FS layer
-    var hasFS = {{{ '$FS' in addedLibraryItems ? 'true' : 'false' }}};
-    if (hasFS) {
-      ['stdout', 'stderr'].forEach(function(name) {
-        var info = FS.analyzePath('/dev/' + name);
-        if (!info) return;
-        var stream = info.object;
-        var rdev = stream.rdev;
-        var tty = TTY.ttys[rdev];
-        if (tty && tty.output && tty.output.length) {
-          has = true;
-        }
-      });
-    }
+    ['stdout', 'stderr'].forEach(function(name) {
+      var info = FS.analyzePath('/dev/' + name);
+      if (!info) return;
+      var stream = info.object;
+      var rdev = stream.rdev;
+      var tty = TTY.ttys[rdev];
+      if (tty && tty.output && tty.output.length) {
+        has = true;
+      }
+    });
 #endif
   } catch(e) {}
   out = print;
   err = printErr;
   if (has) {
     warnOnce('stdio streams had content in them that was not flushed. you should set EXIT_RUNTIME to 1 (see the FAQ), or make sure to emit a newline when you printf etc.');
-#if FILESYSTEM == 0
+#if FILESYSTEM == 0 || SYSCALLS_REQUIRE_FILESYSTEM == 0
     warnOnce('(this may also be due to not including full filesystem support - try building with -s FORCE_FILESYSTEM=1)');
 #endif
   }
@@ -411,9 +406,9 @@ function abort(what) {
   if (ENVIRONMENT_IS_PTHREAD) console.error('Pthread aborting at ' + new Error().stack);
 #endif
   if (what !== undefined) {
+    what += '';
     out(what);
     err(what);
-    what = JSON.stringify(what)
   } else {
     what = '';
   }
@@ -464,6 +459,11 @@ if (!ENVIRONMENT_IS_PTHREAD) // EXIT_RUNTIME=0 only applies to default behavior 
 
 #if USE_PTHREADS
 if (!ENVIRONMENT_IS_PTHREAD) run();
+#if EMBIND
+else {  // Embind must initialize itself on all threads, as it generates support JS.
+  Module['___embind_register_native_and_builtin_types']();
+}
+#endif // EMBIND
 #else
 run();
 #endif

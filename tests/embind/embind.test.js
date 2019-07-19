@@ -442,6 +442,12 @@ module({
             assert.equal('ABCD', e);
         });
 
+        test("can pass long string to std::basic_string<unsigned char>", function() {
+            var s = 'this string is long enough to exceed the short string optimization';
+            var e = cm.emval_test_take_and_return_std_basic_string_unsigned_char(s);
+            assert.equal(s, e);
+        });
+
         test("can pass Uint8ClampedArray to std::basic_string<unsigned char>", function() {
             var e = cm.emval_test_take_and_return_std_basic_string_unsigned_char(new Uint8ClampedArray([65, 66, 67, 68]));
             assert.equal('ABCD', e);
@@ -1183,6 +1189,22 @@ module({
 
             var b = cm.ValHolder.makeValHolder("foo");
             assert.equal("foo", b.getVal());
+            b.delete();
+        });
+
+        test("function objects as class methods", function() {
+            let b = cm.ValHolder.makeValHolder("foo");
+
+            // get & set via std::function
+            assert.equal("foo", b.getValFunction());
+            b.setValFunction("bar");
+
+            // get & set via 'callable'
+            assert.equal("bar", b.getValFunctor());
+            b.setValFunctor("baz");
+
+            assert.equal("baz", b.getValFunction())
+
             b.delete();
         });
 

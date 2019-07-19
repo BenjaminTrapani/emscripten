@@ -51,12 +51,14 @@ function preprocess(text, filenameHint) {
           var truthy = !!eval(after);
           showStack.push(truthy);
         } else if (line.indexOf('#include') === 0) {
-          var filename = line.substr(line.indexOf(' ')+1);
-          if (filename.indexOf('"') === 0) {
-            filename = filename.substr(1, filename.length - 2);
+          if (showStack.indexOf(false) === -1) {
+            var filename = line.substr(line.indexOf(' ')+1);
+            if (filename.indexOf('"') === 0) {
+              filename = filename.substr(1, filename.length - 2);
+            }
+            var included = read(filename);
+            ret += '\n' + preprocess(included, filename) + '\n';
           }
-          var included = read(filename);
-          ret += '\n' + preprocess(included, filename) + '\n';
         } else if (line.indexOf('#else') === 0) {
           assert(showStack.length > 0);
           showStack.push(!showStack.pop());
@@ -826,9 +828,6 @@ var asmPrintCounter = 0;
 
 // See makeSetValue
 function makeGetValue(ptr, pos, type, noNeedFirst, unsigned, ignore, align, noSafe, forceAsm) {
-  if (UNALIGNED_MEMORY) align = 1;
-  else if (FORCE_ALIGNED_MEMORY && !isIllegalType(type)) align = 8;
-
   if (isStructType(type)) {
     var typeData = Types.types[type];
     var ret = [];
@@ -907,9 +906,6 @@ function makeGetValueAsm(ptr, pos, type, unsigned) {
 //!             which means we should write to all slabs, ignore type differences if any on reads, etc.
 //! @param noNeedFirst Whether to ignore the offset in the pointer itself.
 function makeSetValue(ptr, pos, value, type, noNeedFirst, ignore, align, noSafe, sep, forcedAlign, forceAsm) {
-  if (UNALIGNED_MEMORY && !forcedAlign) align = 1;
-  else if (FORCE_ALIGNED_MEMORY && !isIllegalType(type)) align = 8;
-
   sep = sep || ';';
   if (isStructType(type)) {
     var typeData = Types.types[type];
@@ -1053,12 +1049,18 @@ function makeHEAPView(which, start, end) {
   return 'HEAP' + which + '.subarray((' + start + ')' + mod + ',(' + end + ')' + mod + ')';
 }
 
-function makeDynCall(sig) {
+// When dynamically linking, some things like dynCalls may not exist in one module and
+// be provided by a linked module, so they must be accessed indirectly using Module
+function exportedAsmFunc(func) {
   if (!MAIN_MODULE && !SIDE_MODULE) {
-    return 'dynCall_' + sig;
+    return func;
   } else {
-    return "Module['dynCall_" + sig + "']";
+    return "Module['" + func + "']";
   }
+}
+
+function makeDynCall(sig) {
+  return exportedAsmFunc('dynCall_' + sig);
 }
 
 var TWO_TWENTY = Math.pow(2, 20);
@@ -1557,6 +1559,13 @@ function getQuoted(str) {
 
 function makeRetainedCompilerSettings() {
   var blacklist = set('STRUCT_INFO');
+  if (STRICT) {
+    for (var i in LEGACY_SETTINGS) {
+      var name = LEGACY_SETTINGS[i][0];
+      blacklist[name] = 0;
+    }
+  }
+
   var ret = {};
   for (var x in this) {
     try {
@@ -1575,3 +1584,18 @@ function getPageSize() {
   return WASM ? WASM_PAGE_SIZE : ASMJS_PAGE_SIZE;
 }
 
+// Receives a function as text, and a function that constructs a modified
+// function, to which we pass the parsed-out name, arguments, and body of the
+// function. Returns the output of that function.
+function modifyFunction(text, func) {
+  var match = text.match(/\s*function\s+([^(]*)?\s*\(([^)]*)\)/);
+  assert(match, 'could not match function ' + text + '.');
+  var name = match[1];
+  var args = match[2];
+  var rest = text.substr(match[0].length);
+  var bodyStart = rest.indexOf('{');
+  assert(bodyStart >= 0);
+  var bodyEnd = rest.lastIndexOf('}');
+  assert(bodyEnd > 0);
+  return func(name, args, rest.substring(bodyStart + 1, bodyEnd));
+}

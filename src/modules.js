@@ -29,8 +29,6 @@ var Types = {
   types: {},
 };
 
-var firstTableIndex = RESERVED_FUNCTION_POINTERS + 1;
-
 // Constructs an array ['a0', 'a1', 'a2', ..., 'a(n-1)']
 function genArgSequence(n) {
   var args = [];
@@ -43,14 +41,8 @@ function genArgSequence(n) {
 var Functions = {
   // All functions that will be implemented in this file. Maps id to signature
   implementedFunctions: {},
-  libraryFunctions: {}, // functions added from the library. value 2 means asmLibraryFunction
-  unimplementedFunctions: {}, // library etc. functions that we need to index, maps id to signature
-
-  nextIndex: firstTableIndex, // Start at a non-0 (even, see below) value
-  neededTables: set('v', 'vi', 'ii', 'iii'), // signatures that appeared (initialized with library stuff
-                                             // we always use), and we will need a function table for
-  blockAddresses: {}, // maps functions to a map of block labels to label ids
-  aliases: {}, // in shared modules (MAIN_MODULE or SHARED_MODULE), a list of aliases for functions that have them
+  // functions added from the library. value 2 means asmLibraryFunction
+  libraryFunctions: {},
 };
 
 var LibraryManager = {
@@ -77,6 +69,12 @@ var LibraryManager = {
       'library_html5.js'
     ];
 
+    if (!DISABLE_EXCEPTION_THROWING) {
+      libraries.push('library_exceptions.js');
+    } else {
+      libraries.push('library_exceptions_stub.js');
+    }
+
     if (!MINIMAL_RUNTIME) {
       libraries.push('library_browser.js');
     }
@@ -91,10 +89,7 @@ var LibraryManager = {
       ]);
 
       // Additional filesystem libraries (in strict mode, link to these explicitly via -lxxx.js)
-      if (!STRICT) {
-        libraries = libraries.concat([
-          'library_lz4.js',
-        ]);
+      if (!STRICT && !MINIMAL_RUNTIME) {
         if (ENVIRONMENT_MAY_BE_WEB || ENVIRONMENT_MAY_BE_WORKER) {
           libraries = libraries.concat([
             'library_idbfs.js',
@@ -115,31 +110,40 @@ var LibraryManager = {
     }
 
     // Additional JS libraries (in strict mode, link to these explicitly via -lxxx.js)
-    if (!STRICT) {
+    if (!STRICT && !MINIMAL_RUNTIME) {
       libraries = libraries.concat([
         'library_webgl.js',
         'library_openal.js',
-        'library_vr.js'
+        'library_vr.js',
+        'library_sdl.js',
+        'library_glut.js',
+        'library_xlib.js',
+        'library_egl.js',
+        'library_glfw.js',
+        'library_uuid.js',
+        'library_glew.js',
+        'library_idbstore.js',
+        'library_async.js'
       ]);
-
-      if (!MINIMAL_RUNTIME) {
-        libraries = libraries.concat([
-          'library_sdl.js',
-          'library_glut.js',
-          'library_xlib.js',
-          'library_egl.js',
-          'library_glfw.js',
-          'library_uuid.js',
-          'library_glew.js',
-          'library_idbstore.js',
-          'library_async.js'
-        ]);
+    } else {
+      if (EMTERPRETIFY_ASYNC || ASYNCIFY) {
+        libraries.push('library_async.js');
+      }
+      if (USE_SDL == 1) {
+        libraries.push('library_sdl.js');
+      }
+      if (USE_SDL == 2) {
+        libraries.push('library_egl.js', 'library_webgl.js');
       }
     }
 
     // If there are any explicitly specified system JS libraries to link to, add those to link.
     if (SYSTEM_JS_LIBRARIES) {
       libraries = libraries.concat(SYSTEM_JS_LIBRARIES.split(','));
+    }
+
+    if (LZ4) {
+      libraries.push('library_lz4.js');
     }
 
     if (USE_WEBGL2) {
@@ -158,6 +162,8 @@ var LibraryManager = {
       LibraryManager.library = {};
     }
 
+    // TODO: deduplicate libraries (not needed for correctness, but avoids unnecessary work)
+
     // Save the list for has() queries later.
     this.libraries = libraries;
 
@@ -169,11 +175,24 @@ var LibraryManager = {
         processed = processMacros(preprocess(src, filename));
         eval(processed);
       } catch(e) {
-        var details = [e, e.lineNumber ? 'line number: ' + e.lineNumber : '', (e.stack || "").toString().replace('Object.<anonymous>', filename)];
+        var details = [e, e.lineNumber ? 'line number: ' + e.lineNumber : ''];
+        if (VERBOSE) {
+          details.push((e.stack || "").toString().replace('Object.<anonymous>', filename));
+        }
         if (processed) {
-          error('failure to execute js library "' + filename + '": ' + details + '\npreprocessed source (you can run a js engine on this to get a clearer error message sometimes):\n=============\n' + processed + '\n=============\n');
+          error('failure to execute js library "' + filename + '": ' + details);
+          if (VERBOSE) {
+            error('preprocessed source (you can run a js engine on this to get a clearer error message sometimes):\n=============\n' + processed + '\n=============');
+          } else {
+            error('use -s VERBOSE to see more details')
+          }
         } else {
-          error('failure to process js library "' + filename + '": ' + details + '\noriginal source:\n=============\n' + src + '\n=============\n');
+          error('failure to process js library "' + filename + '": ' + details);
+          if (VERBOSE) {
+            error('original source:\n=============\n' + src + '\n=============');
+          } else {
+            error('use -s VERBOSE to see more details')
+          }
         }
         throw e;
       }

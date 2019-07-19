@@ -26,7 +26,7 @@ Special considerations
 
 The Emscripten implementation for the pthreads API should follow the POSIX standard closely, but some behavioral differences do exist:
 
-- At runtime, you can use the ``emscripten_has_threading_support()`` function to
+- At runtime, you can `#include <emscripten/threading.h>` and use the ``emscripten_has_threading_support()`` function to
   test whether the currently executing code was compiled with pthreads support
   enabled. If this function returns true, then the currently executing code was
   compiled with ``-s USE_PTHREADS=1`` (and the current browser supports
@@ -56,6 +56,8 @@ The Emscripten implementation for the pthreads API should follow the POSIX stand
 - One particular note to pay attention to when porting is that sometimes in existing codebases the callback function pointers to pthread_create() and pthread_cleanup_push() omit the void* argument, which strictly speaking is undefined behavior in C/C++, but works in several x86 calling conventions. Doing this in Emscripten will issue a compiler warning, and can abort at runtime when attempting to call a function pointer with incorrect signature, so in the presence of such errors, it is good to check the signatures of the thread callback functions.
 
 - Note that the function emscripten_num_logical_cores() will always return the value of navigator.hardwareConcurrency, i.e. the number of logical cores on the system, even when shared memory is not supported. This means that it is possible for emscripten_num_logical_cores() to return a value greater than 1, while at the same time emscripten_has_threading_support() can return false. The return value of emscripten_has_threading_support() denotes whether the browser has shared memory support available.
+
+- Pthreads + memory growth (`ALLOW_MEMORY_GROWTH`) is especially tricky, see `wasm design issue #1271 <https://github.com/WebAssembly/design/issues/1271>`_. This currently causes JS accessing the wasm memory to be slow - but this will likely only be noticeable if the JS does heavy work (wasm runs at full speed, so moving work over can fix this). This also requires that your JS be aware that the HEAP* views may need to be updated - use the `GROWABLE_HEAP_*` helper functions which automatically handle that for you.
 
 Also note that when compiling code that uses pthreads, an additional JavaScript file `NAME.worker.js` is generated alongside the output .js file (where `NAME` is the basename of the main file being emitted). That file must be deployed with the rest of the generated code files. By default, `NAME.worker.js` will be loaded relative to the main HTML page URL. If it is desirable to load the file from a different location e.g. in a CDN environment, then one can define the `Module.locateFile(filename)` function in the main HTML `Module` object to return the URL of the target location of the `NAME.worker.js` entry point. If this function is not defined in `Module`, then the default location relative to the main HTML file is used.
 

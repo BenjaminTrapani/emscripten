@@ -1053,10 +1053,8 @@ var LibrarySDL = {
 #if ASSERTIONS
       assert(tempCtx, 'TTF_Init must have been called');
 #endif
-      tempCtx.save();
       tempCtx.font = fontString;
       var ret = tempCtx.measureText(text).width | 0;
-      tempCtx.restore();
       return ret;
     },
 
@@ -1719,9 +1717,9 @@ var LibrarySDL = {
     // We actually do the whole screen in Unlock...
   },
 
-#if EMTERPRETIFY_ASYNC == 0
+#if EMTERPRETIFY_ASYNC == 0 && !(WASM_BACKEND && ASYNCIFY)
   SDL_Delay: function(delay) {
-    if (!ENVIRONMENT_IS_WORKER) abort('SDL_Delay called on the main thread! Potential infinite loop, quitting.');
+    if (!ENVIRONMENT_IS_WORKER) abort('SDL_Delay called on the main thread! Potential infinite loop, quitting. (consider building with async support like ASYNCIFY)');
     // horrible busy-wait, but in a worker it at least does not block rendering
     var now = Date.now();
     while (Date.now() - now < delay) {}
@@ -2226,7 +2224,7 @@ var LibrarySDL = {
     return flags; // We support JPG, PNG, TIF because browsers do
   },
 
-  IMG_Load_RW__deps: ['SDL_LockSurface', 'SDL_FreeRW'],
+  IMG_Load_RW__deps: ['SDL_LockSurface', 'SDL_FreeRW', '$PATH_FS'],
   IMG_Load_RW__proxy: 'sync',
   IMG_Load_RW__sig: 'iii',
   IMG_Load_RW: function(rwopsID, freeSrc) {
@@ -2243,9 +2241,9 @@ var LibrarySDL = {
         }
       }
       var callStbImage = function(func, params) {
-        var x = Module['_malloc']({{{ QUANTUM_SIZE }}});
-        var y = Module['_malloc']({{{ QUANTUM_SIZE }}});
-        var comp = Module['_malloc']({{{ QUANTUM_SIZE }}});
+        var x = Module['_malloc']({{{ Runtime.QUANTUM_SIZE }}});
+        var y = Module['_malloc']({{{ Runtime.QUANTUM_SIZE }}});
+        var comp = Module['_malloc']({{{ Runtime.QUANTUM_SIZE }}});
         addCleanup(function() {
           Module['_free'](x);
           Module['_free'](y);
@@ -2281,7 +2279,7 @@ var LibrarySDL = {
       }
 
       if (!raw) {
-        filename = PATH.resolve(filename);
+        filename = PATH_FS.resolve(filename);
         var raw = Module["preloadedImages"][filename];
         if (!raw) {
           if (raw === null) err('Trying to reuse preloaded image, but freePreloadedMediaOnUse is set!');
@@ -2740,6 +2738,7 @@ var LibrarySDL = {
     return 1;
   },
 
+  Mix_LoadWAV_RW__deps: ['$PATH_FS'],
   Mix_LoadWAV_RW__proxy: 'sync',
   Mix_LoadWAV_RW__sig: 'iii',
   Mix_LoadWAV_RW: function(rwopsID, freesrc) {
@@ -2775,7 +2774,7 @@ var LibrarySDL = {
     var bytes;
 
     if (rwops.filename !== undefined) {
-      filename = PATH.resolve(rwops.filename);
+      filename = PATH_FS.resolve(rwops.filename);
       var raw = Module["preloadedAudios"][filename];
       if (!raw) {
         if (raw === null) err('Trying to reuse preloaded audio, but freePreloadedMediaOnUse is set!');
@@ -3157,8 +3156,16 @@ var LibrarySDL = {
   TTF_Init__proxy: 'sync',
   TTF_Init__sig: 'i',
   TTF_Init: function() {
-    var canvas = document.createElement('canvas');
-    SDL.ttfContext = canvas.getContext('2d');
+    // OffscreenCanvas 2D is faster than Canvas for text operations, so we use
+    // it if it's available.
+    try {
+      var offscreenCanvas = new OffscreenCanvas(0, 0);
+      SDL.ttfContext = offscreenCanvas.getContext('2d');
+    } catch (ex) {
+      var canvas = document.createElement('canvas');
+      SDL.ttfContext = canvas.getContext('2d');
+    }
+
     return 0;
   },
 

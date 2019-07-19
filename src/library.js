@@ -25,15 +25,9 @@
 LibraryManager.library = {
   // keep this low in memory, because we flatten arrays with them in them
 #if USE_PTHREADS
-  stdin: '; if (ENVIRONMENT_IS_PTHREAD) _stdin = PthreadWorkerInit._stdin; else PthreadWorkerInit._stdin = _stdin = {{{ makeStaticAlloc(4) }}}',
-  stdout: '; if (ENVIRONMENT_IS_PTHREAD) _stdout = PthreadWorkerInit._stdout; else PthreadWorkerInit._stdout = _stdout = {{{ makeStaticAlloc(4) }}}',
-  stderr: '; if (ENVIRONMENT_IS_PTHREAD) _stderr = PthreadWorkerInit._stderr; else PthreadWorkerInit._stderr = _stderr = {{{ makeStaticAlloc(4) }}}',
   _impure_ptr: '; if (ENVIRONMENT_IS_PTHREAD) __impure_ptr = PthreadWorkerInit.__impure_ptr; else PthreadWorkerInit.__impure_ptr __impure_ptr = {{{ makeStaticAlloc(4) }}}',
   __dso_handle: '; if (ENVIRONMENT_IS_PTHREAD) ___dso_handle = PthreadWorkerInit.___dso_handle; else PthreadWorkerInit.___dso_handle = ___dso_handle = {{{ makeStaticAlloc(4) }}}',
 #else
-  stdin: '{{{ makeStaticAlloc(1) }}}',
-  stdout: '{{{ makeStaticAlloc(1) }}}',
-  stderr: '{{{ makeStaticAlloc(1) }}}',
   _impure_ptr: '{{{ makeStaticAlloc(1) }}}',
   __dso_handle: '{{{ makeStaticAlloc(1) }}}',
 #endif
@@ -477,16 +471,16 @@ LibraryManager.library = {
   },
 
   emscripten_get_heap_size: function() {
-    return TOTAL_MEMORY;
+    return HEAP8.length;
   },
 
 #if ABORTING_MALLOC
   $abortOnCannotGrowMemory: function(requestedSize) {
 #if ASSERTIONS
 #if WASM
-    abort('Cannot enlarge memory arrays to size ' + requestedSize + ' bytes (OOM). Either (1) compile with  -s TOTAL_MEMORY=X  with X higher than the current value ' + TOTAL_MEMORY + ', (2) compile with  -s ALLOW_MEMORY_GROWTH=1  which allows increasing the size at runtime, or (3) if you want malloc to return NULL (0) instead of this abort, compile with  -s ABORTING_MALLOC=0 ');
+    abort('Cannot enlarge memory arrays to size ' + requestedSize + ' bytes (OOM). Either (1) compile with  -s TOTAL_MEMORY=X  with X higher than the current value ' + HEAP8.length + ', (2) compile with  -s ALLOW_MEMORY_GROWTH=1  which allows increasing the size at runtime, or (3) if you want malloc to return NULL (0) instead of this abort, compile with  -s ABORTING_MALLOC=0 ');
 #else
-    abort('Cannot enlarge memory arrays to size ' + requestedSize + ' bytes (OOM). Either (1) compile with  -s TOTAL_MEMORY=X  with X higher than the current value ' + TOTAL_MEMORY + ', (2) compile with  -s ALLOW_MEMORY_GROWTH=1  which allows increasing the size at runtime but prevents some optimizations, (3) set Module.TOTAL_MEMORY to a higher value before the program runs, or (4) if you want malloc to return NULL (0) instead of this abort, compile with  -s ABORTING_MALLOC=0 ');
+    abort('Cannot enlarge memory arrays to size ' + requestedSize + ' bytes (OOM). Either (1) compile with  -s TOTAL_MEMORY=X  with X higher than the current value ' + HEAP8.length + ', (2) compile with  -s ALLOW_MEMORY_GROWTH=1  which allows increasing the size at runtime but prevents some optimizations, (3) set Module.TOTAL_MEMORY to a higher value before the program runs, or (4) if you want malloc to return NULL (0) instead of this abort, compile with  -s ABORTING_MALLOC=0 ');
 #endif
 #else
     abort('OOM');
@@ -496,7 +490,7 @@ LibraryManager.library = {
 
 #if TEST_MEMORY_GROWTH_FAILS
   $emscripten_realloc_buffer: function(size) {
-    return null;
+    return false;
   },
 #else
 
@@ -504,22 +498,27 @@ LibraryManager.library = {
 #if WASM
     var PAGE_MULTIPLE = {{{ getPageSize() }}};
     size = alignUp(size, PAGE_MULTIPLE); // round up to wasm page size
-    var old = Module['buffer'];
-    var oldSize = old.byteLength;
+    var oldSize = buffer.byteLength;
     // native wasm support
+    // note that this is *not* threadsafe. multiple threads can call .grow(), and each
+    // presents a delta, so in theory we may over-allocate here (e.g. if two threads
+    // ask to grow from 256MB to 512MB, we get 2 requests to add +256MB, and may end
+    // up growing to 768MB (even though we may have been able to make do with 512MB).
+    // TODO: consider decreasing the step sizes in emscripten_resize_heap
     try {
       var result = wasmMemory.grow((size - oldSize) / {{{ WASM_PAGE_SIZE }}}); // .grow() takes a delta compared to the previous size
       if (result !== (-1 | 0)) {
         // success in native wasm memory growth, get the buffer from the memory
-        return Module['buffer'] = wasmMemory.buffer;
+        buffer = wasmMemory.buffer;
+        return true;
       } else {
-        return null;
+        return false;
       }
     } catch(e) {
 #if ASSERTIONS
       console.error('emscripten_realloc_buffer: Attempted to grow from ' + oldSize  + ' bytes to ' + size + ' bytes, but got error: ' + e);
 #endif
-      return null;
+      return false;
     }
 #else // asm.js:
     try {
@@ -529,17 +528,9 @@ LibraryManager.library = {
     } catch(e) {
       return false;
     }
-    Module['_emscripten_replace_memory'](newBuffer);
-    HEAP8 = new Int8Array(newBuffer);
-    HEAP16 = new Int16Array(newBuffer);
-    HEAP32 = new Int32Array(newBuffer);
-    HEAPU8 = new Uint8Array(newBuffer);
-    HEAPU16 = new Uint16Array(newBuffer);
-    HEAPU32 = new Uint32Array(newBuffer);
-    HEAPF32 = new Float32Array(newBuffer);
-    HEAPF64 = new Float64Array(newBuffer);
     buffer = newBuffer;
-    return newBuffer;
+    Module['_emscripten_replace_memory'](newBuffer);
+    return true;
 #endif
   },
 #endif // ~TEST_MEMORY_GROWTH_FAILS
@@ -548,25 +539,27 @@ LibraryManager.library = {
 #if ABORTING_MALLOC
   , '$abortOnCannotGrowMemory'
 #endif
-#if ALLOW_MEMORY_GROWTH && !USE_PTHREADS
+#if ALLOW_MEMORY_GROWTH
   , '$emscripten_realloc_buffer'
 #endif
   ],
   emscripten_resize_heap: function(requestedSize) {
-#if USE_PTHREADS
-    abort('Cannot enlarge memory arrays, since compiling with pthreads support enabled (-s USE_PTHREADS=1).');
-#else
 #if ALLOW_MEMORY_GROWTH == 0
 #if ABORTING_MALLOC
     abortOnCannotGrowMemory(requestedSize);
 #else
     return false; // malloc will report failure
-#endif
-#else
+#endif // ABORTING_MALLOC
+#else // ALLOW_MEMORY_GROWTH == 0
     var oldSize = _emscripten_get_heap_size();
-    // TOTAL_MEMORY is the current size of the actual array, and DYNAMICTOP is the new top.
-#if ASSERTIONS
-    assert(requestedSize > oldSize); // This function should only ever be called after the ceiling of the dynamic heap has already been bumped to exceed the current total size of the asm.js heap.
+    // With pthreads, races can happen (another thread might increase the size in between), so return a failure, and let the caller retry.
+#if USE_PTHREADS
+    if (requestedSize <= oldSize) {
+      return false;
+    }
+#endif // USE_PTHREADS
+#if ASSERTIONS && !USE_PTHREADS
+    assert(requestedSize > oldSize);
 #endif
 
 #if EMSCRIPTEN_TRACING
@@ -587,18 +580,25 @@ LibraryManager.library = {
     var MIN_TOTAL_MEMORY = 16777216;
     var newSize = Math.max(oldSize, MIN_TOTAL_MEMORY); // So the loop below will not be infinite, and minimum asm.js memory size is 16MB.
 
+    // TODO: see realloc_buffer - for PTHREADS we may want to decrease these jumps
     while (newSize < requestedSize) { // Keep incrementing the heap size as long as it's less than what is requested.
+#if MEMORY_GROWTH_STEP != -1
+      // Memory growth is fixed to a multiple of the WASM page size of 64KB (eg. 16MB) set by the user.
+      newSize = Math.min(alignUp(newSize + {{{ MEMORY_GROWTH_STEP }}}, PAGE_MULTIPLE), LIMIT);
+#else
       if (newSize <= 536870912) {
         newSize = alignUp(2 * newSize, PAGE_MULTIPLE); // Simple heuristic: double until 1GB...
       } else {
         // ..., but after that, add smaller increments towards 2GB, which we cannot reach
         newSize = Math.min(alignUp((3 * newSize + 2147483648) / 4, PAGE_MULTIPLE), LIMIT);
-#if ASSERTIONS
-        if (newSize === oldSize) {
-          warnOnce('Cannot ask for more memory since we reached the practical limit in browsers (which is just below 2GB), so the request would have failed. Requesting only ' + TOTAL_MEMORY);
-        }
-#endif
       }
+#endif // MEMORY_GROWTH_STEP
+
+#if ASSERTIONS
+      if (newSize === oldSize) {
+        warnOnce('Cannot ask for more memory since we reached the practical limit in browsers (which is just below 2GB), so the request would have failed. Requesting only ' + HEAP8.length);
+      }
+#endif
     }
 
 #if WASM_MEM_MAX != -1
@@ -616,31 +616,40 @@ LibraryManager.library = {
 #endif
       return false;
     }
+#endif // WASM_MEM_MAX
+
+#if USE_ASAN
+    // One byte of ASan's shadow memory shadows 8 bytes of real memory.
+    // If we increase the memory beyond 8 * ASAN_SHADOW_SIZE, then the shadow memory overflows.
+    // This causes real memory to be corrupted.
+    newSize = Math.min(newSize, {{{ 8 * ASAN_SHADOW_SIZE }}});
+    if (newSize == oldSize) {
+#if ASSERTIONS
+      err('Failed to grow the heap from ' + oldSize + ', as we reached the limit of our shadow memory. Increase ASAN_SHADOW_SIZE.');
+#endif
+      return false;
+    }
 #endif
 
 #if ASSERTIONS
     var start = Date.now();
 #endif
 
-    var replacement = emscripten_realloc_buffer(newSize);
-    if (!replacement || replacement.byteLength != newSize) {
+    if (!emscripten_realloc_buffer(newSize)) {
 #if ASSERTIONS
       err('Failed to grow the heap from ' + oldSize + ' bytes to ' + newSize + ' bytes, not enough memory!');
-      if (replacement) {
-        err('Expected to get back a buffer of size ' + newSize + ' bytes, but instead got back a buffer of size ' + replacement.byteLength);
-      }
 #endif
       return false;
     }
 
-    // everything worked
-    updateGlobalBuffer(replacement);
+#if USE_PTHREADS
+    // Updating the views here is not strictly necessary, since we instrument each load and store
+    // to do so, but doing it here is clean and may be more efficient (avoid surprising the JIT
+    // later by taking a never-taken branch).
+#endif
     updateGlobalBufferViews();
 
-    TOTAL_MEMORY = newSize;
-    HEAPU32[DYNAMICTOP_PTR>>2] = requestedSize;
-
-#if ASSERTIONS && !WASM
+#if ASSERTIONS && (!WASM || WASM2JS)
     err('Warning: Enlarging memory arrays, this is not fast! ' + [oldSize, newSize]);
 #endif
 
@@ -652,7 +661,6 @@ LibraryManager.library = {
 
     return true;
 #endif // ALLOW_MEMORY_GROWTH
-#endif // USE_PTHREADS
   },
 
 #if MINIMAL_RUNTIME && !ASSERTIONS && !ALLOW_MEMORY_GROWTH
@@ -716,56 +724,64 @@ LibraryManager.library = {
     var oldDynamicTopOnChange = 0;
     var newDynamicTop = 0;
     var totalMemory = 0;
-#if USE_PTHREADS
     totalMemory = _emscripten_get_heap_size()|0;
-
+#if USE_PTHREADS
     // Perform a compare-and-swap loop to update the new dynamic top value. This is because
-    // this function can becalled simultaneously in multiple threads.
+    // this function can be called simultaneously in multiple threads.
     do {
+#endif
+
+#if !USE_PTHREADS
+      oldDynamicTop = HEAP32[DYNAMICTOP_PTR>>2]|0;
+#else
       oldDynamicTop = Atomics_load(HEAP32, DYNAMICTOP_PTR>>2)|0;
+#endif
       newDynamicTop = oldDynamicTop + increment | 0;
-      // Asking to increase dynamic top to a too high value? In pthreads builds we cannot
-      // enlarge memory, so this needs to fail.
+
       if (((increment|0) > 0 & (newDynamicTop|0) < (oldDynamicTop|0)) // Detect and fail if we would wrap around signed 32-bit int.
-        | (newDynamicTop|0) < 0 // Also underflow, sbrk() should be able to be used to subtract.
-        | (newDynamicTop|0) > (totalMemory|0)) {
+        | (newDynamicTop|0) < 0) { // Also underflow, sbrk() should be able to be used to subtract.
 #if ABORTING_MALLOC
         abortOnCannotGrowMemory(newDynamicTop|0)|0;
-#else
+#endif
         ___setErrNo({{{ cDefine('ENOMEM') }}});
         return -1;
-#endif
       }
+
+      if ((newDynamicTop|0) > (totalMemory|0)) {
+        if (_emscripten_resize_heap(newDynamicTop|0)|0) {
+          // We resized the heap. Start another loop iteration if we need to.
+#if USE_PTHREADS
+          totalMemory = _emscripten_get_heap_size()|0;
+          continue;
+#endif
+        } else {
+          // We failed to resize the heap.
+#if USE_PTHREADS
+          // Possibly another thread has grown memory meanwhile, if we race with them. If memory grew,
+          // start another loop iteration.
+          if ((_emscripten_get_heap_size()|0) > totalMemory) {
+            totalMemory = _emscripten_get_heap_size()|0;
+            continue;
+          }
+#endif
+          ___setErrNo({{{ cDefine('ENOMEM') }}});
+          return -1;
+        }
+      }
+
+#if !USE_PTHREADS
+      HEAP32[DYNAMICTOP_PTR>>2] = newDynamicTop|0;
+#else
       // Attempt to update the dynamic top to new value. Another thread may have beat this thread to the update,
       // in which case we will need to start over by iterating the loop body again.
       oldDynamicTopOnChange = Atomics_compareExchange(HEAP32, DYNAMICTOP_PTR>>2, oldDynamicTop|0, newDynamicTop|0)|0;
     } while((oldDynamicTopOnChange|0) != (oldDynamicTop|0));
-#else // singlethreaded build: (-s USE_PTHREADS=0)
-    oldDynamicTop = HEAP32[DYNAMICTOP_PTR>>2]|0;
-    newDynamicTop = oldDynamicTop + increment | 0;
-
-    if (((increment|0) > 0 & (newDynamicTop|0) < (oldDynamicTop|0)) // Detect and fail if we would wrap around signed 32-bit int.
-      | (newDynamicTop|0) < 0) { // Also underflow, sbrk() should be able to be used to subtract.
-#if ABORTING_MALLOC
-      abortOnCannotGrowMemory(newDynamicTop|0)|0;
 #endif
-      ___setErrNo({{{ cDefine('ENOMEM') }}});
-      return -1;
-    }
 
-    totalMemory = _emscripten_get_heap_size()|0;
-    if ((newDynamicTop|0) <= (totalMemory|0)) {
-      HEAP32[DYNAMICTOP_PTR>>2] = newDynamicTop|0;
-    } else {
-      if ((_emscripten_resize_heap(newDynamicTop|0)|0) == 0) {
-        ___setErrNo({{{ cDefine('ENOMEM') }}});
-        return -1;
-      }
-    }
-#endif
     return oldDynamicTop|0;
   },
 
+  brk__deps: ['sbrk'],
   brk__asm: true,
   brk__sig: ['ii'],
   brk__deps: ['__setErrNo', 'emscripten_get_heap_size', 'emscripten_resize_heap'
@@ -775,39 +791,11 @@ LibraryManager.library = {
   ],
   brk: function(newDynamicTop) {
     newDynamicTop = newDynamicTop|0;
-    var totalMemory = 0;
-#if USE_PTHREADS
-    totalMemory = _emscripten_get_heap_size()|0;
-    // Asking to increase dynamic top to a too high value? In pthreads builds we cannot
-    // enlarge memory, so this needs to fail.
-    if ((newDynamicTop|0) < 0 | (newDynamicTop|0) > (totalMemory|0)) {
-#if ABORTING_MALLOC
-      abortOnCannotGrowMemory(newDynamicTop|0)|0;
-#else
-      ___setErrNo({{{ cDefine('ENOMEM') }}});
-      return -1;
-#endif
-    }
-    Atomics_store(HEAP32, DYNAMICTOP_PTR>>2, newDynamicTop|0)|0;
-#else // singlethreaded build: (-s USE_PTHREADS=0)
-    if ((newDynamicTop|0) < 0) {
-#if ABORTING_MALLOC
-      abortOnCannotGrowMemory(newDynamicTop|0)|0;
-#endif
-      ___setErrNo({{{ cDefine('ENOMEM') }}});
+    var diff = 0;
+    diff = newDynamicTop - (_sbrk(0) | 0) | 0;
+    if ((_sbrk(diff | 0) | 0) == -1) {
       return -1;
     }
-
-    totalMemory = _emscripten_get_heap_size()|0;
-    if ((newDynamicTop|0) <= (totalMemory|0)) {
-      HEAP32[DYNAMICTOP_PTR>>2] = newDynamicTop|0;
-    } else {
-      if ((_emscripten_resize_heap(newDynamicTop|0)|0) == 0) {
-        ___setErrNo({{{ cDefine('ENOMEM') }}});
-        return -1;
-      }
-    }
-#endif
     return 0;
   },
 #endif // ~ (MINIMAL_RUNTIME && !ASSERTIONS && !ALLOW_MEMORY_GROWTH)
@@ -825,7 +813,7 @@ LibraryManager.library = {
   // stdlib.h
   // ==========================================================================
 
-#if !MINIMAL_RUNTIME
+#if !MINIMAL_RUNTIME && MALLOC != 'none'
   // tiny, fake malloc/free implementation. If the program actually uses malloc,
   // a compiled version will be used; this will only be used if the runtime
   // needs to allocate something, for which this is good enough if otherwise
@@ -908,6 +896,8 @@ LibraryManager.library = {
       ENV['PWD'] = '/';
       ENV['HOME'] = '/home/web_user';
       ENV['LANG'] = 'C.UTF-8';
+      // Browser language detection #8751
+      ENV['LANG'] = ((typeof navigator === 'object' && navigator.languages && navigator.languages[0]) || 'C').replace('-', '_') + '.UTF-8';
       ENV['_'] = Module['thisProgram'];
       // Allocate memory.
 #if !MINIMAL_RUNTIME // TODO: environment support in MINIMAL_RUNTIME
@@ -960,6 +950,8 @@ LibraryManager.library = {
     _getenv.ret = allocateUTF8(ENV[name]);
     return _getenv.ret;
   },
+  // Alias for sanitizers which intercept getenv.
+  emscripten_get_env: 'getenv',
   clearenv__deps: ['$ENV', '__buildEnvironment'],
   clearenv__proxy: 'sync',
   clearenv__sig: 'i',
@@ -1416,293 +1408,12 @@ LibraryManager.library = {
   },
 #endif
 
-  $EXCEPTIONS__deps: ['__cxa_free_exception'],
-  $EXCEPTIONS: {
-    last: 0,
-    caught: [],
-    infos: {},
-    deAdjust: function(adjusted) {
-      if (!adjusted || EXCEPTIONS.infos[adjusted]) return adjusted;
-      for (var key in EXCEPTIONS.infos) {
-        var ptr = +key; // the iteration key is a string, and if we throw this, it must be an integer as that is what we look for
-        var adj = EXCEPTIONS.infos[ptr].adjusted;
-        var len = adj.length;
-        for (var i = 0; i < len; i++) {
-          if (adj[i] === adjusted) {
-#if EXCEPTION_DEBUG
-            err('de-adjusted exception ptr ' + adjusted + ' to ' + ptr);
-#endif
-            return ptr;
-          }
-        }
-      }
-#if EXCEPTION_DEBUG
-      err('no de-adjustment for unknown exception ptr ' + adjusted);
-#endif
-      return adjusted;
-    },
-    addRef: function(ptr) {
-#if EXCEPTION_DEBUG
-      err('addref ' + ptr);
-#endif
-      if (!ptr) return;
-      var info = EXCEPTIONS.infos[ptr];
-      info.refcount++;
-    },
-    decRef: function(ptr) {
-#if EXCEPTION_DEBUG
-      err('decref ' + ptr);
-#endif
-      if (!ptr) return;
-      var info = EXCEPTIONS.infos[ptr];
-      assert(info.refcount > 0);
-      info.refcount--;
-      // A rethrown exception can reach refcount 0; it must not be discarded
-      // Its next handler will clear the rethrown flag and addRef it, prior to
-      // final decRef and destruction here
-      if (info.refcount === 0 && !info.rethrown) {
-        if (info.destructor) {
-#if WASM_BACKEND == 0
-          Module['dynCall_vi'](info.destructor, ptr);
-#else
-          // In Wasm, destructors return 'this' as in ARM
-          Module['dynCall_ii'](info.destructor, ptr);
-#endif
-        }
-        delete EXCEPTIONS.infos[ptr];
-        ___cxa_free_exception(ptr);
-#if EXCEPTION_DEBUG
-        err('decref freeing exception ' + [ptr, EXCEPTIONS.last, 'stack', EXCEPTIONS.caught]);
-#endif
-      }
-    },
-    clearRef: function(ptr) {
-      if (!ptr) return;
-      var info = EXCEPTIONS.infos[ptr];
-      info.refcount = 0;
-    },
-  },
-
-  // Exceptions
-  __cxa_allocate_exception: function(size) {
-    return _malloc(size);
-  },
-
-  __cxa_free_exception: function(ptr) {
-    try {
-      return _free(ptr);
-    } catch(e) { // XXX FIXME
-#if ASSERTIONS
-      err('exception during cxa_free_exception: ' + e);
-#endif
-    }
-  },
-  __cxa_increment_exception_refcount__deps: ['$EXCEPTIONS'],
-  __cxa_increment_exception_refcount: function(ptr) {
-    EXCEPTIONS.addRef(EXCEPTIONS.deAdjust(ptr));
-  },
-  __cxa_decrement_exception_refcount__deps: ['$EXCEPTIONS'],
-  __cxa_decrement_exception_refcount: function(ptr) {
-    EXCEPTIONS.decRef(EXCEPTIONS.deAdjust(ptr));
-  },
-  // Here, we throw an exception after recording a couple of values that we need to remember
-  // We also remember that it was the last exception thrown as we need to know that later.
-  __cxa_throw__sig: 'viii',
-  __cxa_throw__deps: ['_ZSt18uncaught_exceptionv', '__cxa_find_matching_catch', '$EXCEPTIONS'],
-  __cxa_throw: function(ptr, type, destructor) {
-#if EXCEPTION_DEBUG
-    err('Compiled code throwing an exception, ' + [ptr,type,destructor]);
-#endif
-    EXCEPTIONS.infos[ptr] = {
-      ptr: ptr,
-      adjusted: [ptr],
-      type: type,
-      destructor: destructor,
-      refcount: 0,
-      caught: false,
-      rethrown: false
-    };
-    EXCEPTIONS.last = ptr;
-    if (!("uncaught_exception" in __ZSt18uncaught_exceptionv)) {
-      __ZSt18uncaught_exceptionv.uncaught_exception = 1;
-    } else {
-      __ZSt18uncaught_exceptionv.uncaught_exception++;
-    }
-    {{{ makeThrow('ptr') }}}
-  },
-  // This exception will be caught twice, but while begin_catch runs twice,
-  // we early-exit from end_catch when the exception has been rethrown, so
-  // pop that here from the caught exceptions.
-  __cxa_rethrow__deps: ['__cxa_end_catch', '$EXCEPTIONS'],
-  __cxa_rethrow: function() {
-    var ptr = EXCEPTIONS.caught.pop();
-    ptr = EXCEPTIONS.deAdjust(ptr);
-    if (!EXCEPTIONS.infos[ptr].rethrown) {
-      // Only pop if the corresponding push was through rethrow_primary_exception
-      EXCEPTIONS.caught.push(ptr)
-      EXCEPTIONS.infos[ptr].rethrown = true;
-    }
-#if EXCEPTION_DEBUG
-    err('Compiled code RE-throwing an exception, popped ' + [ptr, EXCEPTIONS.last, 'stack', EXCEPTIONS.caught]);
-#endif
-    EXCEPTIONS.last = ptr;
-    {{{ makeThrow('ptr') }}}
-  },
-  llvm_eh_exception__deps: ['$EXCEPTIONS'],
-  llvm_eh_exception: function() {
-    return EXCEPTIONS.last;
-  },
-  llvm_eh_selector__jsargs: true,
-  llvm_eh_selector__deps: ['$EXCEPTIONS'],
-  llvm_eh_selector: function(unused_exception_value, personality/*, varargs*/) {
-    var type = EXCEPTIONS.last;
-    for (var i = 2; i < arguments.length; i++) {
-      if (arguments[i] ==  type) return type;
-    }
-    return 0;
-  },
-  llvm_eh_typeid_for: function(type) {
-    return type;
-  },
-  __cxa_begin_catch__deps: ['_ZSt18uncaught_exceptionv', '$EXCEPTIONS'],
-  __cxa_begin_catch: function(ptr) {
-    var info = EXCEPTIONS.infos[ptr];
-    if (info && !info.caught) {
-      info.caught = true;
-      __ZSt18uncaught_exceptionv.uncaught_exception--;
-    }
-    if (info) info.rethrown = false;
-    EXCEPTIONS.caught.push(ptr);
-#if EXCEPTION_DEBUG
-		err('cxa_begin_catch ' + [ptr, 'stack', EXCEPTIONS.caught]);
-#endif
-    EXCEPTIONS.addRef(EXCEPTIONS.deAdjust(ptr));
-    return ptr;
-  },
-  // We're done with a catch. Now, we can run the destructor if there is one
-  // and free the exception. Note that if the dynCall on the destructor fails
-  // due to calling apply on undefined, that means that the destructor is
-  // an invalid index into the FUNCTION_TABLE, so something has gone wrong.
-  __cxa_end_catch__deps: ['__cxa_free_exception', '$EXCEPTIONS', 'setThrew'],
-  __cxa_end_catch: function() {
-    // Clear state flag.
-    _setThrew(0);
-    // Call destructor if one is registered then clear it.
-    var ptr = EXCEPTIONS.caught.pop();
-#if EXCEPTION_DEBUG
-    err('cxa_end_catch popped ' + [ptr, EXCEPTIONS.last, 'stack', EXCEPTIONS.caught]);
-#endif
-    if (ptr) {
-      EXCEPTIONS.decRef(EXCEPTIONS.deAdjust(ptr));
-      EXCEPTIONS.last = 0; // XXX in decRef?
-    }
-  },
-  __cxa_get_exception_ptr: function(ptr) {
-#if EXCEPTION_DEBUG
-    err('cxa_get_exception_ptr ' + ptr);
-#endif
-    // TODO: use info.adjusted?
-    return ptr;
-  },
-  _ZSt18uncaught_exceptionv: function() { // std::uncaught_exception()
-    return !!__ZSt18uncaught_exceptionv.uncaught_exception;
-  },
-  __cxa_uncaught_exception__deps: ['_ZSt18uncaught_exceptionv'],
-  __cxa_uncaught_exception: function() {
-    return !!__ZSt18uncaught_exceptionv.uncaught_exception;
-  },
-
-  __cxa_call_unexpected: function(exception) {
-    err('Unexpected exception thrown, this is not properly supported - aborting');
-    ABORT = true;
-    throw exception;
-  },
-
-  __cxa_current_primary_exception: function() {
-    var ret = EXCEPTIONS.caught[EXCEPTIONS.caught.length-1] || 0;
-    if (ret) EXCEPTIONS.addRef(EXCEPTIONS.deAdjust(ret));
-    return ret;
-  },
-
-  __cxa_rethrow_primary_exception__deps: ['__cxa_rethrow'],
-  __cxa_rethrow_primary_exception: function(ptr) {
-    if (!ptr) return;
-    ptr = EXCEPTIONS.deAdjust(ptr);
-    EXCEPTIONS.caught.push(ptr);
-    EXCEPTIONS.infos[ptr].rethrown = true;
-    ___cxa_rethrow();
-  },
-
   terminate: '__cxa_call_unexpected',
 
-  __gxx_personality_v0__deps: ['_ZSt18uncaught_exceptionv', '__cxa_find_matching_catch'],
   __gxx_personality_v0: function() {
   },
 
   __gcc_personality_v0: function() {
-  },
-
-  // Finds a suitable catch clause for when an exception is thrown.
-  // In normal compilers, this functionality is handled by the C++
-  // 'personality' routine. This is passed a fairly complex structure
-  // relating to the context of the exception and makes judgements
-  // about how to handle it. Some of it is about matching a suitable
-  // catch clause, and some of it is about unwinding. We already handle
-  // unwinding using 'if' blocks around each function, so the remaining
-  // functionality boils down to picking a suitable 'catch' block.
-  // We'll do that here, instead, to keep things simpler.
-
-  __cxa_find_matching_catch__deps: ['__resumeException', '$EXCEPTIONS'],
-  __cxa_find_matching_catch: function() {
-    var thrown = EXCEPTIONS.last;
-    if (!thrown) {
-      // just pass through the null ptr
-      {{{ makeStructuralReturn([0, 0]) }}};
-    }
-    var info = EXCEPTIONS.infos[thrown];
-    var throwntype = info.type;
-    if (!throwntype) {
-      // just pass through the thrown ptr
-      {{{ makeStructuralReturn(['thrown', 0]) }}};
-    }
-    var typeArray = Array.prototype.slice.call(arguments);
-
-    var pointer = Module['___cxa_is_pointer_type'](throwntype);
-    // can_catch receives a **, add indirection
-    if (!___cxa_find_matching_catch.buffer) ___cxa_find_matching_catch.buffer = _malloc(4);
-#if EXCEPTION_DEBUG
-    out("can_catch on " + [thrown]);
-#endif
-    {{{ makeSetValue('___cxa_find_matching_catch.buffer', '0', 'thrown', '*') }}};
-    thrown = ___cxa_find_matching_catch.buffer;
-    // The different catch blocks are denoted by different types.
-    // Due to inheritance, those types may not precisely match the
-    // type of the thrown object. Find one which matches, and
-    // return the type of the catch block which should be called.
-    for (var i = 0; i < typeArray.length; i++) {
-      if (typeArray[i] && Module['___cxa_can_catch'](typeArray[i], throwntype, thrown)) {
-        thrown = {{{ makeGetValue('thrown', '0', '*') }}}; // undo indirection
-        info.adjusted.push(thrown);
-#if EXCEPTION_DEBUG
-        out("  can_catch found " + [thrown, typeArray[i]]);
-#endif
-        {{{ makeStructuralReturn(['thrown', 'typeArray[i]']) }}};
-      }
-    }
-    // Shouldn't happen unless we have bogus data in typeArray
-    // or encounter a type for which emscripten doesn't have suitable
-    // typeinfo defined. Best-efforts match just in case.
-    thrown = {{{ makeGetValue('thrown', '0', '*') }}}; // undo indirection
-    {{{ makeStructuralReturn(['thrown', 'throwntype']) }}};
-  },
-
-  __resumeException__deps: ['$EXCEPTIONS', function() { Functions.libraryFunctions['___resumeException'] = 1 }], // will be called directly from compiled code
-  __resumeException: function(ptr) {
-#if EXCEPTION_DEBUG
-    out("Resuming exception " + [ptr, EXCEPTIONS.last]);
-#endif
-    if (!EXCEPTIONS.last) { EXCEPTIONS.last = ptr; }
-    {{{ makeThrow('ptr') }}}
   },
 
   llvm_stacksave: function() {
@@ -2181,15 +1892,39 @@ LibraryManager.library = {
       DLFCN.errorMsg = 'Tried to dlsym() from an unopened handle: ' + handle;
       return 0;
     }
+
     var lib = LDSO.loadedLibs[handle];
-    symbol = '_' + symbol;
-    if (!lib.module.hasOwnProperty(symbol)) {
-      DLFCN.errorMsg = ('Tried to lookup unknown symbol "' + symbol +
+    var isMainModule = lib.module == Module;
+
+    var mangled = '_' + symbol;
+    var modSymbol = mangled;
+#if WASM_BACKEND
+    if (!isMainModule) {
+      modSymbol = symbol;
+    }
+#endif
+
+    if (!lib.module.hasOwnProperty(modSymbol)) {
+      DLFCN.errorMsg = ('Tried to lookup unknown symbol "' + modSymbol +
                              '" in dynamic lib: ' + lib.name);
       return 0;
     }
 
-    var result = lib.module[symbol];
+    var result = lib.module[modSymbol];
+#if WASM
+    // Attempt to get the real "unwrapped" symbol so we have more chance of
+    // getting wasm function which can be added to a table.
+    if (isMainModule) {
+#if WASM_BACKEND
+      var asmSymbol = symbol;
+#else
+      var asmSymbol = mangled;
+#endif
+      if (lib.module["asm"][asmSymbol]) {
+        result = lib.module["asm"][asmSymbol];
+      }
+    }
+#endif
     if (typeof result !== 'function')
       return result;
 
@@ -2215,7 +1950,7 @@ LibraryManager.library = {
     // Insert the function into the wasm table.  Since we know the function
     // comes directly from the loaded wasm module we can insert it directly
     // into the table, avoiding any JS interaction.
-    return addWasmFunction(result);
+    return addFunctionWasm(result);
 #else
     // convert the exported function into a function pointer using our generic
     // JS mechanism.
@@ -2248,9 +1983,9 @@ LibraryManager.library = {
     // report all function pointers as coming from this program itself XXX not really correct in any way
     var fname = stringToNewUTF8(Module['thisProgram'] || './this.program'); // XXX leak
     {{{ makeSetValue('info', 0, 'fname', 'i32') }}};
-    {{{ makeSetValue('info', QUANTUM_SIZE, '0', 'i32') }}};
-    {{{ makeSetValue('info', QUANTUM_SIZE*2, '0', 'i32') }}};
-    {{{ makeSetValue('info', QUANTUM_SIZE*3, '0', 'i32') }}};
+    {{{ makeSetValue('info', Runtime.QUANTUM_SIZE, '0', 'i32') }}};
+    {{{ makeSetValue('info', Runtime.QUANTUM_SIZE*2, '0', 'i32') }}};
+    {{{ makeSetValue('info', Runtime.QUANTUM_SIZE*3, '0', 'i32') }}};
     return 1;
   },
 #endif // MAIN_MODULE != 0
@@ -2591,7 +2326,27 @@ LibraryManager.library = {
       '%R': '%H:%M',                    // Replaced by the time in 24-hour notation
       '%T': '%H:%M:%S',                 // Replaced by the time
       '%x': '%m/%d/%y',                 // Replaced by the locale's appropriate date representation
-      '%X': '%H:%M:%S'                  // Replaced by the locale's appropriate date representation
+      '%X': '%H:%M:%S',                 // Replaced by the locale's appropriate time representation
+      // Modified Conversion Specifiers
+      '%Ec': '%c',                      // Replaced by the locale's alternative appropriate date and time representation.
+      '%EC': '%C',                      // Replaced by the name of the base year (period) in the locale's alternative representation.
+      '%Ex': '%m/%d/%y',                // Replaced by the locale's alternative date representation.
+      '%EX': '%H:%M:%S',                // Replaced by the locale's alternative time representation.
+      '%Ey': '%y',                      // Replaced by the offset from %EC (year only) in the locale's alternative representation.
+      '%EY': '%Y',                      // Replaced by the full alternative year representation.
+      '%Od': '%d',                      // Replaced by the day of the month, using the locale's alternative numeric symbols, filled as needed with leading zeros if there is any alternative symbol for zero; otherwise, with leading <space> characters.
+      '%Oe': '%e',                      // Replaced by the day of the month, using the locale's alternative numeric symbols, filled as needed with leading <space> characters.
+      '%OH': '%H',                      // Replaced by the hour (24-hour clock) using the locale's alternative numeric symbols.
+      '%OI': '%I',                      // Replaced by the hour (12-hour clock) using the locale's alternative numeric symbols.
+      '%Om': '%m',                      // Replaced by the month using the locale's alternative numeric symbols.
+      '%OM': '%M',                      // Replaced by the minutes using the locale's alternative numeric symbols.
+      '%OS': '%S',                      // Replaced by the seconds using the locale's alternative numeric symbols.
+      '%Ou': '%u',                      // Replaced by the weekday as a number in the locale's alternative representation (Monday=1).
+      '%OU': '%U',                      // Replaced by the week number of the year (Sunday as the first day of the week, rules corresponding to %U ) using the locale's alternative numeric symbols.
+      '%OV': '%V',                      // Replaced by the week number of the year (Monday as the first day of the week, rules corresponding to %V ) using the locale's alternative numeric symbols.
+      '%Ow': '%w',                      // Replaced by the number of the weekday (Sunday=0) using the locale's alternative numeric symbols.
+      '%OW': '%W',                      // Replaced by the week number of the year (Monday as the first day of the week) using the locale's alternative numeric symbols.
+      '%Oy': '%y',                      // Replaced by the year (offset from %C ) using the locale's alternative numeric symbols.
     };
     for (var rule in EXPANSION_RULES_1) {
       pattern = pattern.replace(new RegExp(rule, 'g'), EXPANSION_RULES_1[rule]);
@@ -2741,8 +2496,7 @@ LibraryManager.library = {
         return '\t';
       },
       '%u': function(date) {
-        var day = new Date(date.tm_year+1900, date.tm_mon+1, date.tm_mday, 0, 0, 0, 0);
-        return day.getDay() || 7;
+        return date.tm_wday || 7;
       },
       '%U': function(date) {
         // Replaced by the week number of the year as a decimal number [00,53].
@@ -2799,8 +2553,7 @@ LibraryManager.library = {
         return leadingNulls(Math.ceil(daysDifference/7), 2);
       },
       '%w': function(date) {
-        var day = new Date(date.tm_year+1900, date.tm_mon+1, date.tm_mday, 0, 0, 0, 0);
-        return day.getDay();
+        return date.tm_wday;
       },
       '%W': function(date) {
         // Replaced by the week number of the year as a decimal number [00,53].
@@ -4374,7 +4127,11 @@ LibraryManager.library = {
   },
 
   emscripten_run_script_string: function(ptr) {
-    {{{ makeEval("var s = eval(UTF8ToString(ptr)) + '';") }}}
+    {{{ makeEval("var s = eval(UTF8ToString(ptr));") }}}
+    if (s == null) {
+      return 0;
+    }
+    s += '';
     var me = _emscripten_run_script_string;
     var len = lengthBytesUTF8(s);
     if (!me.bufferSize || me.bufferSize < len+1) {
@@ -4654,6 +4411,252 @@ LibraryManager.library = {
     else return lengthBytesUTF8(str);
   },
 
+  // Generates a representation of the program counter from a line of stack trace.
+  // The exact return value depends in whether we are running WASM or JS, and whether
+  // the engine supports offsets into WASM. See the function body for details.
+  emscripten_generate_pc: function(frame) {
+    var match;
+
+    if (match = /\bwasm-function\[\d+\]:(0x[0-9a-f]+)/.exec(frame)) {
+      // some engines give the binary offset directly, so we use that as return address
+      return +match[1];
+    } else if (match = /\bwasm-function\[(\d+)\]:(\d+)/.exec(frame)) {
+      // other engines only give function index and offset in the function,
+      // so we try using the offset converter. If that doesn't work,
+      // we pack index and offset into a "return address"
+      return wasmOffsetConverter ? wasmOffsetConverter.convert(+match[1], +match[2]) :
+             (+match[1] << 16) + +match[2];
+    } else if (match = /:(\d+):\d+(?:\)|$)/.exec(frame)) {
+      // if we are in js, we can use the js line number as the "return address"
+      // this should work for wasm2js and fastcomp
+      // we tag the high bit to distinguish this from wasm addresses
+      return 0x80000000 | +match[1];
+    } else {
+      // return 0 if we can't find any
+      return 0;
+    }
+  },
+
+  // Returns a representation of a call site of the caller of this function, in a manner
+  // similar to __builtin_return_address. If level is 0, we return the call site of the
+  // caller of this function.
+  emscripten_return_address__deps: ['emscripten_get_callstack_js', 'emscripten_generate_pc'],
+  emscripten_return_address: function(level) {
+    var callstack = _emscripten_get_callstack_js(0).split('\n');
+
+    // skip this function and the caller to get caller's return address
+    return _emscripten_generate_pc(callstack[level + 2]);
+  },
+
+  $UNWIND_CACHE: {},
+
+  // This function pulls the JavaScript stack trace and updates UNWIND_CACHE so that
+  // our representation of the program counter is mapped to the line of the stack trace
+  // for every line in the stack trace. This allows emscripten_pc_get_* to lookup the
+  // line of the stack trace from the PC and return meaningful information.
+  //
+  // Additionally, it saves a copy of the entire stack trace and the return address of
+  // the caller. This is because there are two common forms of a stack trace.
+  // The first form starts the stack trace at the caller of the function requesting a stack
+  // trace. In this case, the function can simply walk down the stack from the return address
+  // using emscripten_return_address with increasing values for level.
+  // The second form starts the stack trace at the current function. This requires a helper
+  // function to get the program counter. This helper function will return the return address.
+  // This is the program counter at the call site. But there is a problem: when calling into
+  // code that performs stack unwinding, the program counter has changed since execution
+  // continued from calling the helper function. So we can't just walk down the stack and expect
+  // to see.the PC value we got. By caching the call stack, we can call emscripten_stack_unwind
+  // with the PC value and use that to unwind the cached stack. Naturally, the PC helper function
+  // will have to call emscripten_stack_snapshot to cache the stack. We also return the return
+  // address of the caller so the PC helper function does not need to call
+  // emscripten_return_address, saving a lot of time.
+  //
+  // One might expect that a sensible solution is to call the stack unwinder and explicitly tell it
+  // how many functions to skip from the stack. However, existing libraries do not work this way.
+  // For example, compiler-rt's sanitizer_common library has macros GET_CALLER_PC_BP_SP and
+  // GET_CURRENT_PC_BP_SP, which obtains the PC value for the two common cases stated above,
+  // respectively. Then, it passes the PC, BP, SP values along until some other function uses them
+  // to unwind. On standard machines, the stack can be unwound by treating BP as a linked list.
+  // This makes PC unnecessary to walk the stack, since walking is done with BP, which remains
+  // valid until the function returns. But on Emscripten, BP does not exist, at least in
+  // JavaScript frames, so we have to rely on PC values. Therefore, we must be able to unwind from
+  // a PC value that may no longer be on the execution stack, and so we are forced to cache the
+  // entire call stack.
+  emscripten_stack_snapshot__deps: ['emscripten_get_callstack_js', 'emscripten_generate_pc',
+                                    '$UNWIND_CACHE', '_emscripten_save_in_unwind_cache'],
+  emscripten_stack_snapshot: function () {
+    var callstack = new Error().stack.split('\n');
+    if (callstack[0] == 'Error') {
+      callstack.shift();
+    }
+    __emscripten_save_in_unwind_cache(callstack);
+
+    // Caches the stack snapshot so that emscripten_stack_unwind_buffer() can unwind from this spot.
+    UNWIND_CACHE.last_addr = _emscripten_generate_pc(callstack[2]);
+    UNWIND_CACHE.last_stack = callstack;
+    return UNWIND_CACHE.last_addr;
+  },
+
+  _emscripten_save_in_unwind_cache__deps: ['$UNWIND_CACHE', 'emscripten_generate_pc'],
+  _emscripten_save_in_unwind_cache: function (callstack) {
+    callstack.forEach(function (frame) {
+      var pc = _emscripten_generate_pc(frame);
+      if (pc) {
+        UNWIND_CACHE[pc] = frame;
+      }
+    });
+  },
+
+  // Unwinds the stack from a cached PC value. See emscripten_stack_snapshot for how this is used.
+  // addr must be the return address of the last call to emscripten_stack_snapshot, or this
+  // function will instead use the current call stack.
+  emscripten_stack_unwind_buffer__deps: ['$UNWIND_CACHE', '_emscripten_save_in_unwind_cache', 'emscripten_generate_pc'],
+  emscripten_stack_unwind_buffer: function (addr, buffer, count) {
+    var stack;
+    if (UNWIND_CACHE.last_addr == addr) {
+      stack = UNWIND_CACHE.last_stack;
+    } else {
+      stack = new Error().stack.split('\n');
+      if (stack[0] == 'Error') {
+        stack.shift();
+      }
+      __emscripten_save_in_unwind_cache(stack);
+    }
+
+    var offset = 2;
+    while (stack[offset] && _emscripten_generate_pc(stack[offset]) != addr) {
+      ++offset;
+    }
+
+    for (var i = 0; i < count && stack[i+offset]; ++i) {
+      {{{ makeSetValue('buffer', 'i*4', '_emscripten_generate_pc(stack[i + offset])', 'i32', 0, true) }}};
+    }
+    return i;
+  },
+
+  // Look up the function name from our stack frame cache with our PC representation.
+  emscripten_pc_get_function__deps: ['$UNWIND_CACHE', 'emscripten_with_builtin_malloc'],
+  emscripten_pc_get_function: function (pc) {
+    var frame = UNWIND_CACHE[pc];
+    if (!frame) return 0;
+
+    var name = null;
+    var match;
+    if (match = /^\s+at (.*) \(.*\)$/.exec(frame)) {
+      name = match[1];
+    } else if (match = /^(.+?)@/.exec(frame)) {
+      name = match[1];
+    }
+    if (!name) return 0;
+
+    _emscripten_with_builtin_malloc(function () {
+      if (_emscripten_pc_get_function.ret) _free(_emscripten_pc_get_function.ret);
+      _emscripten_pc_get_function.ret = allocateUTF8(name);
+    });
+    return _emscripten_pc_get_function.ret;
+  },
+
+  emscripten_pc_get_source_js__deps: ['$UNWIND_CACHE', 'emscripten_generate_pc'],
+  emscripten_pc_get_source_js: function (pc) {
+    var frame = UNWIND_CACHE[pc];
+    if (!frame) return null;
+    if (UNWIND_CACHE.last_get_source_pc == pc) return UNWIND_CACHE.last_source;
+
+    var match;
+    var source;
+#if LOAD_SOURCE_MAP
+    if (wasmSourceMap) {
+      var info = wasmSourceMap.lookup(pc);
+      if (info) {
+        source = {file: info.source, line: info.line, column: info.column};
+      }
+    }
+#endif
+
+    if (!source) {
+      // Example: at callMain (a.out.js:6335:22)
+      if (match = /\((.*):(\d+):(\d+)\)$/.exec(frame)) {
+        source = {file: match[1], line: match[2], column: match[3]};
+      // Example: main@a.out.js:1337:42
+      } else if (match = /@(.*):(\d+):(\d+)/.exec(frame)) {
+        source = {file: match[1], line: match[2], column: match[3]};
+      }
+    }
+    UNWIND_CACHE.last_get_source_pc = pc;
+    UNWIND_CACHE.last_source = source;
+    return source;
+  },
+
+  // Look up the file name from our stack frame cache with our PC representation.
+  emscripten_pc_get_file__deps: ['emscripten_pc_get_source_js', 'emscripten_with_builtin_malloc'],
+  emscripten_pc_get_file: function (pc) {
+    var result = _emscripten_pc_get_source_js(pc);
+    if (!result) return 0;
+
+    _emscripten_with_builtin_malloc(function () {
+      if (_emscripten_pc_get_file.ret) _free(_emscripten_pc_get_file.ret);
+      _emscripten_pc_get_file.ret = allocateUTF8(result.file);
+    });
+    return _emscripten_pc_get_file.ret;
+  },
+
+  // Look up the line number from our stack frame cache with our PC representation.
+  emscripten_pc_get_line__deps: ['emscripten_pc_get_source_js'],
+  emscripten_pc_get_line: function (pc) {
+    var result = _emscripten_pc_get_source_js(pc);
+    return result ? result.line : 0;
+  },
+
+  // Look up the column number from our stack frame cache with our PC representation.
+  emscripten_pc_get_column__deps: ['emscripten_pc_get_source_js'],
+  emscripten_pc_get_column: function (pc) {
+    var result = _emscripten_pc_get_source_js(pc);
+    return result ? result.column || 0 : 0;
+  },
+
+  emscripten_get_module_name: function(buf, length) {
+    return stringToUTF8(wasmBinaryFile, buf, length);
+  },
+
+  emscripten_with_builtin_malloc__deps: ['emscripten_builtin_malloc', 'emscripten_builtin_free', 'emscripten_builtin_memalign'],
+  emscripten_with_builtin_malloc: function (func) {
+    var prev_malloc = _malloc;
+    var prev_memalign = _memalign;
+    var prev_free = _free;
+    _malloc = _emscripten_builtin_malloc;
+    _memalign = _emscripten_builtin_memalign;
+    _free = _emscripten_builtin_free;
+    try {
+      return func();
+    } finally {
+      _malloc = prev_malloc;
+      _memalign = prev_memalign;
+      _free = prev_free;
+    }
+  },
+
+  emscripten_builtin_mmap2__deps: ['emscripten_with_builtin_malloc', '_emscripten_syscall_mmap2'],
+  emscripten_builtin_mmap2: function (addr, len, prot, flags, fd, off) {
+    return _emscripten_with_builtin_malloc(function () {
+      return __emscripten_syscall_mmap2(addr, len, prot, flags, fd, off);
+    });
+  },
+
+  emscripten_builtin_munmap__deps: ['emscripten_with_builtin_malloc', '_emscripten_syscall_munmap'],
+  emscripten_builtin_munmap: function (addr, len) {
+    return _emscripten_with_builtin_malloc(function () {
+      return __emscripten_syscall_munmap(addr, len);
+    });
+  },
+
+  emscripten_get_stack_top: function() {
+    return STACKTOP;
+  },
+
+  emscripten_get_stack_base: function() {
+    return STACK_BASE;
+  },
+
   //============================
   // i64 math
   //============================
@@ -4730,24 +4733,6 @@ LibraryManager.library = {
   __lockfile: function() { return 1 },
   __unlockfile: function(){},
 
-  // ubsan (undefined behavior sanitizer) support
-  // TODO(sbc): Use the actual implementations from clang's compiler-rt
-  __ubsan_handle_float_cast_overflow: function(id, post) {
-    abort('Undefined behavior! ubsan_handle_float_cast_overflow: ' + [id, post]);
-  },
-
-  __ubsan_handle_pointer_overflow: function(id, post) {
-    abort('Undefined behavior! ubsan_handle_pointer_overflow: ' + [id, post]);
-  },
-
-  __ubsan_handle_type_mismatch_v1: function(id, post) {
-    abort('Undefined behavior! ubsan_handle_type_mismatch_v1: ' + [id, post]);
-  },
-
-  __ubsan_handle_add_overflow: function(id, post) {
-    abort('Undefined behavior! ubsan_handle_add_overflow: ' + [id, post]);
-  },
-
   // USE_FULL_LIBRARY hacks
   realloc: function() { throw 'bad realloc called' },
 
@@ -4779,6 +4764,16 @@ LibraryManager.library = {
 
   _Unwind_DeleteException: function(ex) {
     err('TODO: Unwind_DeleteException');
+  },
+
+  // error handling
+
+  $runAndAbortIfError: function(func) {
+    try {
+      return func();
+    } catch (e) {
+      abort(e);
+    }
   },
 
   // autodebugging

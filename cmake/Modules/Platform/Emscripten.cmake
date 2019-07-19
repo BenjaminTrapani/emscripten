@@ -21,6 +21,7 @@ set(CMAKE_SYSTEM_NAME Emscripten)
 set(CMAKE_SYSTEM_VERSION 1)
 
 set(CMAKE_CROSSCOMPILING TRUE)
+set_property(GLOBAL PROPERTY TARGET_SUPPORTS_SHARED_LIBS FALSE)
 
 # Advertise Emscripten as a 32-bit platform (as opposed to CMAKE_SYSTEM_PROCESSOR=x86_64 for 64-bit platform),
 # since some projects (e.g. OpenCV) use this to detect bitness.
@@ -43,13 +44,6 @@ set(UNIX 1)
 # Do a no-op access on the CMAKE_TOOLCHAIN_FILE variable so that CMake will not issue a warning on it being unused.
 if (CMAKE_TOOLCHAIN_FILE)
 endif()
-
-# In order for check_function_exists() detection to work, we must signal it to pass an additional flag, which causes the compilation
-# to abort if linking results in any undefined symbols. The CMake detection mechanism depends on the undefined symbol error to be raised.
-# Disable wasm in cmake checks so that (1) we do not depend on wasm support just for configuration (perhaps the user does not intend
-# to build to wasm; using asm.js only depends on js which we need anyhow), and (2) we don't have issues with a separate .wasm file
-# on the side, async startup, etc..
-set(CMAKE_REQUIRED_FLAGS "-s WASM=0")
 
 # Locate where the Emscripten compiler resides in relative to this toolchain file.
 if ("${EMSCRIPTEN_ROOT_PATH}" STREQUAL "")

@@ -285,7 +285,7 @@ var LibraryGLEmulation = {
 
       function ensurePrecision(source) {
         if (!/precision +(low|medium|high)p +float *;/.test(source)) {
-          source = 'precision mediump float;\n' + source;
+          source = '#ifdef GL_FRAGMENT_PRECISION_HIGH\nprecision highp float;\n#else\nprecision mediump float;\n#endif\n' + source;
         }
         return source;
       }
@@ -363,7 +363,6 @@ var LibraryGLEmulation = {
             source = 'varying float v_fogFragCoord;   \n' +
                      source.replace(/gl_FogFragCoord/g, 'v_fogFragCoord');
           }
-          source = ensurePrecision(source);
         } else { // Fragment shader
           for (i = 0; i < GLImmediate.MAX_TEXTURES; i++) {
             old = source;
@@ -3129,7 +3128,7 @@ var LibraryGLEmulation = {
     GLImmediate.prepareClientAttributes(count, false);
     GLImmediate.mode = mode;
     if (!GL.currArrayBuffer) {
-      GLImmediate.firstVertex = end ? start : TOTAL_MEMORY; // if we don't know the start, set an invalid value and we will calculate it later from the indices
+      GLImmediate.firstVertex = end ? start : HEAP8.length; // if we don't know the start, set an invalid value and we will calculate it later from the indices
       GLImmediate.lastVertex = end ? end+1 : 0;
       GLImmediate.vertexData = HEAPF32.subarray(GLImmediate.vertexPointer >> 2, end ? (GLImmediate.vertexPointer + (end+1)*GLImmediate.stride) >> 2 : undefined); // XXX assuming float
     }

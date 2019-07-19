@@ -103,7 +103,7 @@ The final *emcc* command includes both the C++ and JavaScript glue code, which a
 
 .. code-block:: bash
 
-  ./emcc my_classes.cpp my_glue_wrapper.cpp --post-js glue.js -o output.js
+  emcc my_classes.cpp my_glue_wrapper.cpp --post-js glue.js -o output.js
 
 The output now contains everything needed to use the C++ classes through JavaScript.
 
@@ -472,10 +472,11 @@ The type names in WebIDL are not identical to those in C++. This section shows t
   "``char``", "``byte``"
   "``char*``", "``DOMString`` (represents a JavaScript string)"
   "``unsigned char``", "``octet``"
-  "``unsigned short int``", "``unsigned short``"
+  "``int``", "``long``"
+  "``long``", "``long``"
   "``unsigned short``", "``unsigned short``"
   "``unsigned long``", "``unsigned long``"
-  "``int``", "``long``"
+  "``long long``", "``long long``"
   "``void``", "``void``"
   "``void*``", "``any`` or ``VoidPtr`` (see :ref:`webidl-binder-voidstar`)"
 

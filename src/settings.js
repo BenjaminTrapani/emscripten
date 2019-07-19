@@ -26,16 +26,6 @@
 
 // Tuning
 
-// This is the size of an individual field in a structure. 1 would
-// lead to e.g. doubles and chars both taking 1 memory address. This
-// is a form of 'compressed' memory, with shrinking and stretching
-// according to the type, when compared to C/C++. On the other hand
-// the normal value of 4 means all fields take 4 memory addresses,
-// as per the norm on a 32-bit machine.
-//
-// Changing this from the default of 4 is deprecated.
-var QUANTUM_SIZE = 4;
-
 // Whether we should add runtime assertions, for example to
 // check that each allocation to the stack does not
 // exceed its size, whether all allocations (stack and static) are
@@ -96,6 +86,8 @@ var TOTAL_MEMORY = 16777216;
 // What malloc()/free() to use, out of
 //  * dlmalloc - a powerful general-purpose malloc
 //  * emmalloc - a simple and compact malloc designed for emscripten
+//  * none     - no malloc() implementation is provided, but you must implement
+//               malloc() and free() yourself.
 // dlmalloc is necessary for multithreading, split memory, and other special
 // modes, and will be used automatically in those cases.
 // In general, if you don't need one of those special modes, and if you don't
@@ -136,6 +128,11 @@ var FAST_UNROLLED_MEMCPY_AND_MEMSET = 1;
 // memory from the system as necessary.
 var ALLOW_MEMORY_GROWTH = 0;
 
+// If ALLOW_MEMORY_GROWTH is true and MEMORY_GROWTH_STEP == -1, memory roughly
+// doubles in size each time is grows. Set MEMORY_GROWTH_STEP to a multiple of
+// WASM page size (64KB), eg. 16MB to enable a slower growth rate.
+var MEMORY_GROWTH_STEP = -1;
+
 // If true, allows more functions to be added to the table at runtime. This is
 // necessary for dynamic linking, and set automatically in that mode.
 var ALLOW_TABLE_GROWTH = 0;
@@ -163,20 +160,6 @@ var GLOBAL_BASE = -1;
 // array for security reasons. That will 'fix' the number from being a NaN or an
 // infinite number.
 var DOUBLE_MODE = 1;
-
-// If enabled, all memory accesses are assumed to be unaligned.  In unaligned
-// memory mode, you can run nonportable code that typically would break in JS
-// (or on ARM for that matter, which also cannot do unaligned reads/writes), at
-// the cost of slowness
-var UNALIGNED_MEMORY = 0;
-
-// If enabled, assumes all reads and writes are fully aligned for the type they
-// use. This is true in proper C code (no undefined behavior), but is sadly
-// common enough that we can't do it by default. See SAFE_HEAP.  For ways to
-// help find places in your code where unaligned reads/writes are done - you
-// might be able to refactor your codebase to prevent them, which leads to
-// smaller and faster code, or even the option to turn this flag on.
-var FORCE_ALIGNED_MEMORY = 0;
 
 // Warn at compile time about instructions that LLVM tells us are not fully
 // aligned.  This is useful to find places in your code where you might refactor
@@ -222,7 +205,7 @@ var USE_CLOSURE_COMPILER = 0;
 // case, no "var" is created for each export, and instead a loop (of small
 // constant code size, no matter how many exports you have) writes all the
 // exports received into the global scope. Doing so is dangerous since such
-// modifications of the global scope can confuse external JS minifer tools, and
+// modifications of the global scope can confuse external JS minifier tools, and
 // also things can break if the scope the code is in is not the global scope
 // (e.g. if you manually enclose them in a function scope).
 var DECLARE_ASM_MODULE_EXPORTS = 1;
@@ -242,25 +225,6 @@ var SKIP_STACK_IN_SMALL = 1;
 // functions of this size or larger in closure. 50 is a reasonable setting if
 // you do not want inlining
 var INLINING_LIMIT = 0;
-
-// A function size above which we try to automatically break up functions into
-// smaller ones, to avoid the downsides of very large functions (JS engines
-// often compile them very slowly, compile them with lower optimizations, or do
-// not optimize them at all). If 0, we do not perform outlining at all.  To see
-// which funcs are large, you can inspect the source in a debug build (-g2 or -g
-// for example), and can run tools/find_bigfuncs.py on that to get a sorted list
-// by size.  Another possibility is to look in the web console in firefox, which
-// will note slowly-compiling functions.  You will probably want to experiment
-// with various values to see the impact on compilation time, code size and
-// runtime throughput. It is hard to say what values to start testing with, but
-// something around 20,000 to 100,000 might make sense.  (The unit size is
-// number of AST nodes.) Outlining decreases maximum function size, but does so
-// at the cost of increasing overall code size as well as performance (outlining
-// itself makes code less optimized, and requires emscripten to disable some
-// passes that are incompatible with it).
-// Note: For wasm there is usually no need to set OUTLINING_LIMIT, as VMs can
-//       handle large functions well anyhow.
-var OUTLINING_LIMIT = 0;
 
 // Run aggressiveVariableElimination in js-optimizer.js
 var AGGRESSIVE_VARIABLE_ELIMINATION = 0;
@@ -305,9 +269,7 @@ var ALIASING_FUNCTION_POINTERS = 0;
 // By default we use a wasm Table for function pointers, which is fast and
 // efficient. When enabling emulation, we also use the Table *outside* the wasm
 // module, exactly as when emulating in asm.js, just replacing the plain JS
-// array with a Table. However, Tables have some limitations currently, like not
-// being able to assign an arbitrary JS method to them, which we have yet to
-// work around.
+// array with a Table.
 var EMULATED_FUNCTION_POINTERS = 0;
 
 // Allows function pointers to be cast, wraps each call of an incorrect type
@@ -564,6 +526,8 @@ var NODEJS_CATCH_EXIT = 1;
 // Whether to enable asyncify transformation
 // This allows to inject some async functions to the C code that appear to be sync
 // e.g. emscripten_sleep
+// On fastcomp this uses the Asyncify IR transform.
+// On upstream this uses the Asyncify pass in Binaryen. TODO: whitelist, coroutines
 var ASYNCIFY = 0;
 
 // Functions that call any function in the list, directly or indirectly
@@ -577,6 +541,24 @@ var ASYNCIFY_WHITELIST = ['qsort',
                           '__uflow',  // currently this link contains some functions in libc
                           '__fwritex',
                           'MUSL_vfprintf'];
+
+// Upstream only: The imports which can do a sync operation. If you add more you will need to
+// add them to here.
+var ASYNCIFY_IMPORTS = ['emscripten_sleep', 'emscripten_wget', 'emscripten_wget_data', 'emscripten_idb_load', 'emscripten_idb_store', 'emscripten_idb_delete', 'emscripten_idb_exists', 'emscripten_idb_load_blob', 'emscripten_idb_store_blob', 'SDL_Delay', '__syscall118'];
+
+// Upstream only:  Whether indirect calls can be on the stack during an unwind/rewind.
+// If you know they cannot, then setting this can be extremely helpful, as otherwise asyncify
+// must assume an indirect call can reach almost everywhere.
+var ASYNCIFY_IGNORE_INDIRECT = 0;
+
+// Upstream only: The size of the asyncify stack - the region used to store unwind/rewind
+// info. This must be large enough to store the call stack and locals. If it is too
+// small, you will see a wasm trap due to executing an "unreachable" instruction.
+// In that case, you should increase this size.
+var ASYNCIFY_STACK_SIZE = 4096;
+
+// Upstream only: Runtime debug logging from asyncify internals.
+var ASYNCIFY_DEBUG = 0;
 
 // Runtime elements that are exported on Module by default. We used to export
 // quite a lot here, but have removed them all, so this option is redundant
@@ -595,11 +577,6 @@ var EXPORTED_RUNTIME_METHODS = [];
 // lets you remove methods that would be exported by default; setting values in
 // this list lets you add to the default list without modifying it.
 var EXTRA_EXPORTED_RUNTIME_METHODS = [];
-
-// Log all FS operations.  This is especially helpful when you're porting a new
-// project and want to see a list of file system operations happening so that
-// you can create a virtual file system with all of the required files.
-var FS_LOG = 0;
 
 // If set to nonzero, the provided virtual filesystem if treated
 // case-insensitive, like Windows and macOS do. If set to 0, the VFS is
@@ -661,20 +638,6 @@ var EXPORT_FUNCTION_TABLES = 0;
 
 var RETAIN_COMPILER_SETTINGS = 0;
 
-// this will contain the emscripten version. you should not modify it. This
-// and the following few settings are useful in combination with
-// RETAIN_COMPILER_SETTINGS
-var EMSCRIPTEN_VERSION = '';
-
-// this will contain the optimization level (-Ox). you should not modify it.
-var OPT_LEVEL = 0;
-
-// this will contain the debug level (-gx). you should not modify it.
-var DEBUG_LEVEL = 0;
-
-// Whether we are profiling functions. you should not modify it.
-var PROFILING_FUNCS = 0;
-
 // JS library elements (C functions implemented in JS) that we include by
 // default. If you want to make sure something is included by the JS compiler,
 // add it here.  For example, if you do not use some emscripten_* C API call
@@ -689,7 +652,6 @@ var DEFAULT_LIBRARY_FUNCS_TO_INCLUDE = [
 	'malloc',
 	'free',
 	'emscripten_get_heap_size', // Used by dynamicAlloc() and -s FETCH=1
-	'emscripten_resize_heap' // Used by dynamicAlloc() and -s FETCH=1
 	];
 
 // This list is also used to determine auto-exporting of library dependencies
@@ -748,6 +710,11 @@ var PROXY_TO_WORKER_FILENAME = '';
 // calls pthread_create() to run the application main() in a pthread.  This is
 // something that applications can do manually as well if they wish, this option
 // is provided as convenience.
+//
+// This proxies Module['canvas'], if present, and if OFFSCREEN_CANVAS support
+// is enabled. This has to happen because this is the only chance - this browser
+// main thread does the the only pthread_create call that happens on
+// that thread, so it's the only chance to transfer the canvas from there.
 var PROXY_TO_PTHREAD = 0;
 
 // If set to 1, this file can be linked with others, either as a shared library
@@ -757,12 +724,19 @@ var PROXY_TO_PTHREAD = 0;
 // are linked with.
 //
 // MAIN_MODULE and SIDE_MODULE both imply this, so it not normally necessary
-// to set this explicitly.
+// to set this explicitly. Note that MAIN_MODULE and SIDE_MODULE mode 2 do
+// *not* set this, so that we still do normal DCE on them, and in that case
+// you must keep relevant things alive yourself using exporting.
 var LINKABLE = 0;
 
 // Emscripten 'strict' build mode: Drop supporting any deprecated build options.
 // Set the environment variable EMCC_STRICT=1 or pass -s STRICT=1 to test that a
 // codebase builds nicely in forward compatible manner.
+// Changes enabled by this:
+//   * ERROR_ON_MISSING_LIBRARIES is enabled
+//   * DISABLE_DEPRECATED_FIND_EVENT_TARGET_BEHAVIOR is enabled
+//   * The C define EMSCRIPTEN is not defined (__EMSCRIPTEN__ always is, and
+//     is the correct thing to use).
 var STRICT = 0;
 
 // If set to 1, we will warn on any undefined symbols that are not resolved by
@@ -776,19 +750,15 @@ var STRICT = 0;
 var WARN_ON_UNDEFINED_SYMBOLS = 1;
 
 // If set to 1, we will give a link-time error on any undefined symbols (see
-// WARN_ON_UNDEFINED_SYMBOLS). The default value is 1. To allow undefined
-// symbols at link time set this to 0, in which case if an undefined function is
-// called a runtime error will occur.  Any undefined symbols that are listed in
-// EXPORTED_FUNCTIONS will also be reported.
+// WARN_ON_UNDEFINED_SYMBOLS). To allow undefined symbols at link time set this
+// to 0, in which case if an undefined function is called a runtime error will
+// occur.  Any undefined symbols that are listed in EXPORTED_FUNCTIONS will also
+// be reported.
 var ERROR_ON_UNDEFINED_SYMBOLS = 1;
 
-// If set to 1, any -lfoo directives pointing to nonexistent library files will
-// issue a linker error.
-
-// The default value for this is currently 0, but will be transitioned to 1 in
-// the future. To keep relying on building with -s ERROR_ON_MISSING_LIBRARIES=0
-// setting, prefer to set that option explicitly in your build system.
-var ERROR_ON_MISSING_LIBRARIES = 0;
+// My default any -lfoo directives pointing to nonexistent library files will
+// issue a linker error.  Set to 0 to downgrade this to a warning.
+var ERROR_ON_MISSING_LIBRARIES = 1;
 
 // Specifies a list of Emscripten-provided JS libraries to link against.
 // (internal, use -lfoo or -lfoo.js to link to Emscripten system JS libraries)
@@ -925,12 +895,6 @@ var SEPARATE_ASM = 0;
 // with --separate-asm) will contain only the functions you provide.
 var ONLY_MY_CODE = 0;
 
-// Enables profile-guided optimization in the form of runtime checks for which
-// functions are actually called. Emits a list during shutdown that you can pass
-// to DEAD_FUNCTIONS (you can also emit the list manually by calling
-// PGOMonitor.dump());
-var PGO = 0;
-
 // JS library functions on this list are not converted to JS, and calls to them
 // are turned into abort()s. This is potentially useful for reducing code size.
 // If a dead function is actually called, you will get a runtime error.
@@ -938,9 +902,6 @@ var PGO = 0;
 // TODO: make this work on compiled methods as well, perhaps by adding a JS
 // optimizer pass?
 var DEAD_FUNCTIONS = [];
-
-// If 1, generate an explicit conversion of zext i1 to i32, using ?:
-var EXPLICIT_ZEXT = 0;
 
 // Global variable to export the module as for environments without a
 // standardized module loading system (e.g. the browser and SM shell).
@@ -1037,17 +998,23 @@ var WASM_BACKEND = 0;
 
 // Whether to compile object files as wasm as opposed to the default
 // of using LLVM IR.
+// Setting to zero will enable LTO and at link time will also enable bitcode
+// versions of the standard libraries.
 var WASM_OBJECT_FILES = 1;
 
 // An optional comma-separated list of script hooks to run after binaryen,
 // in binaryen's /scripts dir.
 var BINARYEN_SCRIPTS = "";
 
-// Whether to ignore implicit traps when optimizing in binaryen.  Implicit traps
-// are the unlikely traps that happen in a load that is out of bounds, or
-// div/rem of 0, etc. We can reorder them, but we can't ignore that they have
-// side effects, so turning on this flag lets us do a little more to reduce code
-// size.
+// Whether to ignore implicit traps when optimizing in binaryen.  Implicit
+// traps are the traps that happen in a load that is out of bounds, or
+// div/rem of 0, etc. With this option set, the optimizer assumes that loads
+// cannot trap, and therefore that they have no side effects at all. This
+// is *not* safe in general, as you may have a load behind a condition which
+// ensures it it is safe; but if the load is assumed to not have side effects it
+// could be executed unconditionally. For that reason this option is generally
+// not useful on large and complex projects, but in a small and simple enough
+// codebase it may help reduce code size a little bit.
 var BINARYEN_IGNORE_IMPLICIT_TRAPS = 0;
 
 // How we handle wasm operations that may trap, which includes integer
@@ -1058,14 +1025,28 @@ var BINARYEN_IGNORE_IMPLICIT_TRAPS = 0;
 //   allow: allow creating operations that can trap. this is the most
 //          compact, as we just emit a single wasm operation, with no
 //          guards to trapping values, and also often the fastest.
+// This setting is only meaningfull with the fastcomp backend.
 var BINARYEN_TRAP_MODE = "allow";
 
 // A comma-separated list of passes to run in the binaryen optimizer, for
-// example, "dce,precompute,vacuum".  When set, this overrides the default
-// passes we would normally run.
+// example, "dce,precompute,vacuum".  When set, this overrides/replaces
+// the default passes we would normally run.
+// Note that you can put any binaryen wasm-opt flag here, not just
+// passes. The key thing is that these flags are sent to the main wasm-opt
+// invocation to optimize the wasm binary, which is when we run several
+// important passes. We may also run wasm-opt for various other reasons,
+// like as part of metadce, and these flags are not passed at those times,
+// so they are a bunch of passes (+ other flags) for that one main
+// invocation.
 var BINARYEN_PASSES = "";
 
-// Set the maximum size of memory in the wasm module (in bytes).  Without this,
+// A comma-separated list of passes to run in the binaryen optimizer, like
+// BINARYEN_PASSES, but that is in addition to any default ones. That is,
+// setting this does not override/replace the default passes, and it is
+// appended at the end of the list of passes.
+var BINARYEN_EXTRA_PASSES = "";
+
+// Set the maximum size of memory in the wasm module (in bytes). Without this,
 // TOTAL_MEMORY is used (as it is used for the initial value), or if memory
 // growth is enabled, the default value here (-1) is to have no limit, but you
 // can set this to set a maximum size that growth will stop at.
@@ -1075,8 +1056,10 @@ var WASM_MEM_MAX = -1;
 
 // Whether to compile the wasm asynchronously, which is more efficient and does
 // not block the main thread. This is currently required for all but the
-// smallest modules to run in V8
-var BINARYEN_ASYNC_COMPILATION = 1;
+// smallest modules to run in chrome.
+//
+// (This option was formerly called BINARYEN_ASYNC_COMPILATION)
+var WASM_ASYNC_COMPILATION = 1;
 
 // WebAssembly defines a "producers section" which compilers and tools can
 // annotate themselves in. Emscripten does not emit this by default, as it
@@ -1120,6 +1103,12 @@ var USE_ICU = 0;
 // 1 = use zlib from emscripten-ports
 var USE_ZLIB = 0;
 
+// 1 = use bzip2 from emscripten-ports
+var USE_BZIP2 = 0;
+
+// 1 = use libjpeg from emscripten-ports
+var USE_LIBJPEG = 0;
+
 // 1 = use libpng from emscripten-ports
 var USE_LIBPNG = 0;
 
@@ -1150,19 +1139,6 @@ var USE_COCOS2D = 0;
 
 // Formats to support in SDL2_image. Valid values: bmp, gif, lbm, pcx, png, pnm, tga, xcf, xpm, xv
 var SDL2_IMAGE_FORMATS = [];
-
-// Compiler debugging options
-//
-// Some useful items:
-//    framework
-//    frameworkLines
-//    gconst
-//    types
-//    vars
-//    unparsedFunctions
-//    metadata
-//    legalizer
-var DEBUG_TAGS_SHOWING = [];
 
 // The list of defines (C_DEFINES) was moved into struct_info.json in the same
 // directory.  That file is automatically parsed by tools/gen_struct_info.py.
@@ -1204,8 +1180,6 @@ var PTHREADS_DEBUG = 0;
 
 var MAX_GLOBAL_ALIGN = -1; // received from the backend
 var IMPLEMENTED_FUNCTIONS = []; // received from the backend
-var JSCALL_START_INDEX = 0; // received from the backend
-var JSCALL_SIG_ORDER = {}; // received from the backend
 
 // Duplicate function elimination. This coalesces function bodies that are
 // identical, which can happen e.g. if two methods have different C/C++ or LLVM
@@ -1327,8 +1301,26 @@ var SINGLE_FILE = 0;
 // to execute the file without the accompanying JS file.
 var EMIT_EMSCRIPTEN_METADATA = 0;
 
-
+//==============================
 // Internal use only, from here
+//==============================
+
+// This will contain the emscripten version. You should not modify this. This
+// and the following few settings are useful in combination with
+// RETAIN_COMPILER_SETTINGS
+var EMSCRIPTEN_VERSION = '';
+
+// This will contain the optimization level (-Ox). You should not modify this.
+var OPT_LEVEL = 0;
+
+// This will contain the debug level (-gx). You should not modify this.
+var DEBUG_LEVEL = 0;
+
+// Whether we are profiling functions. You should not modify this.
+var PROFILING_FUNCS = 0;
+
+// Whether we are emitting a symbol map. You should not modify this.
+var EMIT_SYMBOL_MAP = 0;
 
 // tracks the list of EM_ASM signatures that are proxied between threads.
 var PROXIED_FUNCTION_SIGNATURES = [];
@@ -1375,17 +1367,23 @@ var STATIC_BUMP = -1;
 // the total initial wasm table size.
 var WASM_TABLE_SIZE = 0;
 
-// if set to 1, then generated WASM files will contain a custom
-// "emscripten_metadata" section that contains information necessary
-// to execute the file without the accompanying JS file.
-var EMIT_EMSCRIPTEN_METADATA = 0;
-
 // Tracks whether we are building with errno support enabled. Set to 0
 // to disable compiling errno support in altogether. This saves a little
 // bit of generated code size in applications that do not care about
 // POSIX errno variable. Setting this to 0 also requires using --closure
 // for effective code size optimizations to take place.
 var SUPPORT_ERRNO = 1;
+
+// Internal: Tracks whether Emscripten should link in exception throwing (C++ 'throw')
+// support library. This does not need to be set directly, but pass -fno-exceptions
+// to the build disable exceptions support. (This is basically -fno-exceptions, but
+// checked at final link time instead of individual .cpp file compile time)
+// If the program *does* contain throwing code (some source files were not compiled
+// with `-fno-exceptions`), and this flag is set at link time, then you will get
+// errors on undefined symbols, as the exception throwing code is not linked in. If
+// so you should either unset the option (if you do want exceptions) or fix the
+// compilation of the source files so that indeed no exceptions are used).
+var DISABLE_EXCEPTION_THROWING = 0;
 
 // Internal: An array of all symbols exported from asm.js/wasm module.
 var MODULE_EXPORTS = [];
@@ -1443,17 +1441,65 @@ var DISABLE_DEPRECATED_FIND_EVENT_TARGET_BEHAVIOR = 0;
 // to explicitly choose to disable HTML minification altogether.
 var MINIFY_HTML = 1;
 
-// Legacy settings that have been removed, and the values they are now fixed to. These can no
-// longer be changed:
-// [OPTION_NAME, POSSIBLE_VALUES, ERROR_EXPLANATION], where POSSIBLE_VALUES is an array of values that will
-// still be silently accepted by the compiler. First element in the list is the canonical/fixed value going forward.
-// This allows existing build systems to keep specifying one of the supported settings, for backwards compatibility.
+// Indicates that the syscalls (which we see statically) indicate that they need full
+// filesystem support. Otherwise, when just a small subset are used, we can get away without
+// including the full filesystem - in particular, if open() is never used, then we don't
+// actually need to support operations on streams.
+var SYSCALLS_REQUIRE_FILESYSTEM = 1;
+
+// A list of feature flags to pass to each binaryen invocation (like wasm-opt, etc.). This
+// is received from wasm-emscripten-finalize, which reads it from the features section.
+var BINARYEN_FEATURES = [];
+
+// Whether EMCC_AUTODEBUG is on, which automatically instruments code for runtime
+// logging that can help in debugging.
+var AUTODEBUG = 0;
+
+// Whether we should use binaryen's wasm2js to convert our wasm to JS. Set when
+// wasm backend is in use with WASM=0 (to enable non-wasm output, we compile to
+// wasm normally, then compile that to JS).
+var WASM2JS = 0;
+
+// Whether we should link in the runtime for ubsan.
+// 0 means do not link ubsan, 1 means link minimal ubsan runtime.
+// This is not meant to be used with `-s`. Instead, to use ubsan, use clang flag
+// -fsanitize=undefined. To use minimal runtime, also pass `-fsanitize-minimal-runtime`.
+var UBSAN_RUNTIME = 0;
+
+// Whether we should link in LSan's runtime library. This is intended to be used
+// by -fsanitize=leak instead of used directly.
+var USE_LSAN = 0;
+
+// Whether we should link in ASan's runtime library. This is intended to be used
+// by -fsanitize=leak instead of used directly.
+var USE_ASAN = 0;
+
+// The size of our shadow memory.
+// By default, we have 32 MiB. This supports 256 MiB of real memory.
+var ASAN_SHADOW_SIZE = 33554432;
+
+// Whether we should load the WASM source map at runtime.
+// This is enabled automatically when using -g4 with sanitizers.
+var LOAD_SOURCE_MAP = 0;
+
+// Whether embind has been enabled.
+var EMBIND = 0;
+
+// Legacy settings that have been removed or renamed.
+// For renamed settings the format is:
+// [OLD_NAME, NEW_NAME]
+// For removed settings (which now effectively have a fixed value and can no
+// longer be changed) the format is:
+// [OPTION_NAME, POSSIBLE_VALUES, ERROR_EXPLANATION], where POSSIBLE_VALUES is
+// an array of values that will still be silently accepted by the compiler.
+// First element in the list is the canonical/fixed value going forward.
+// This allows existing build systems to keep specifying one of the supported
+// settings, for backwards compatibility.
 var LEGACY_SETTINGS = [
-  ['ASM_JS', [1, 2], 'ASM_JS must be enabled in fastcomp'],
-  ['SAFE_HEAP', [0, 1], 'safe heap must be 0 or 1 in fastcomp'],
+  ['BINARYEN_ASYNC_COMPILATION', 'WASM_ASYNC_COMPILATION'],
   ['UNALIGNED_MEMORY', [0], 'forced unaligned memory not supported in fastcomp'],
   ['FORCE_ALIGNED_MEMORY', [0], 'forced aligned memory is not supported in fastcomp'],
-  ['PGO', [0], 'pgo not supported in fastcomp'],
+  ['PGO', [0], 'pgo no longer supported'],
   ['QUANTUM_SIZE', [4], 'altering the QUANTUM_SIZE is not supported'],
   ['FUNCTION_POINTER_ALIGNMENT', [2], 'Starting from Emscripten 1.37.29, no longer available (https://github.com/emscripten-core/emscripten/pull/6091)'],
   ['BUILD_AS_SHARED_LIB', [0], 'Starting from Emscripten 1.38.16, no longer available (https://github.com/emscripten-core/emscripten/pull/7433)'],

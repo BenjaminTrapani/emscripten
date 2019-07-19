@@ -13,6 +13,10 @@ Module.realPrint = out;
 out = err = function(){};
 #endif
 
+#if WASM2JS
+#include "wasm2js.js"
+#endif
+
 #if WASM
 if (typeof WebAssembly !== 'object') {
 #if ASSERTIONS
@@ -35,7 +39,7 @@ var wasmTable;
 #if USE_PTHREADS
 // For sending to workers.
 var wasmModule;
-#endif
+#endif // USE_PTHREADS
 
 //========================================
 // Runtime essentials
@@ -147,39 +151,6 @@ function cwrap(ident, returnType, argTypes, opts) {
   return function() {
     return ccall(ident, returnType, argTypes, arguments, opts);
   }
-}
-
-/** @type {function(number, number, string, boolean=)} */
-function setValue(ptr, value, type, noSafe) {
-  type = type || 'i8';
-  if (type.charAt(type.length-1) === '*') type = 'i32'; // pointers are 32-bit
-#if SAFE_HEAP
-  if (noSafe) {
-    switch(type) {
-      case 'i1': {{{ makeSetValue('ptr', '0', 'value', 'i1', undefined, undefined, undefined, '1') }}}; break;
-      case 'i8': {{{ makeSetValue('ptr', '0', 'value', 'i8', undefined, undefined, undefined, '1') }}}; break;
-      case 'i16': {{{ makeSetValue('ptr', '0', 'value', 'i16', undefined, undefined, undefined, '1') }}}; break;
-      case 'i32': {{{ makeSetValue('ptr', '0', 'value', 'i32', undefined, undefined, undefined, '1') }}}; break;
-      case 'i64': {{{ makeSetValue('ptr', '0', 'value', 'i64', undefined, undefined, undefined, '1') }}}; break;
-      case 'float': {{{ makeSetValue('ptr', '0', 'value', 'float', undefined, undefined, undefined, '1') }}}; break;
-      case 'double': {{{ makeSetValue('ptr', '0', 'value', 'double', undefined, undefined, undefined, '1') }}}; break;
-      default: abort('invalid type for setValue: ' + type);
-    }
-  } else {
-#endif
-    switch(type) {
-      case 'i1': {{{ makeSetValue('ptr', '0', 'value', 'i1') }}}; break;
-      case 'i8': {{{ makeSetValue('ptr', '0', 'value', 'i8') }}}; break;
-      case 'i16': {{{ makeSetValue('ptr', '0', 'value', 'i16') }}}; break;
-      case 'i32': {{{ makeSetValue('ptr', '0', 'value', 'i32') }}}; break;
-      case 'i64': {{{ makeSetValue('ptr', '0', 'value', 'i64') }}}; break;
-      case 'float': {{{ makeSetValue('ptr', '0', 'value', 'float') }}}; break;
-      case 'double': {{{ makeSetValue('ptr', '0', 'value', 'double') }}}; break;
-      default: abort('invalid type for setValue: ' + type);
-    }
-#if SAFE_HEAP
-  }
-#endif
 }
 
 var ALLOC_NORMAL = 0; // Tries to use _malloc()
@@ -321,10 +292,6 @@ var HEAP,
 /** @type {Float64Array} */
   HEAPF64;
 
-function updateGlobalBuffer(buf) {
-  Module['buffer'] = buffer = buf;
-}
-
 function updateGlobalBufferViews() {
   Module['HEAP8'] = HEAP8 = new Int8Array(buffer);
   Module['HEAP16'] = HEAP16 = new Int16Array(buffer);
@@ -367,8 +334,8 @@ var TOTAL_STACK = {{{ TOTAL_STACK }}};
 if (Module['TOTAL_STACK']) assert(TOTAL_STACK === Module['TOTAL_STACK'], 'the stack size can no longer be determined at runtime')
 #endif
 
-var TOTAL_MEMORY = Module['TOTAL_MEMORY'] || {{{ TOTAL_MEMORY }}};
-if (TOTAL_MEMORY < TOTAL_STACK) err('TOTAL_MEMORY should be larger than TOTAL_STACK, was ' + TOTAL_MEMORY + '! (TOTAL_STACK=' + TOTAL_STACK + ')');
+var INITIAL_TOTAL_MEMORY = Module['TOTAL_MEMORY'] || {{{ TOTAL_MEMORY }}};
+if (INITIAL_TOTAL_MEMORY < TOTAL_STACK) err('TOTAL_MEMORY should be larger than TOTAL_STACK, was ' + INITIAL_TOTAL_MEMORY + '! (TOTAL_STACK=' + TOTAL_STACK + ')');
 
 // Initialize the runtime's memory
 #if ASSERTIONS
@@ -401,68 +368,74 @@ if (typeof SharedArrayBuffer === 'undefined' || typeof Atomics === 'undefined') 
 #include "runtime_sab_polyfill.js"
 
 #if USE_PTHREADS
-#if !WASM
-if (typeof SharedArrayBuffer !== 'undefined') {
-  if (!ENVIRONMENT_IS_PTHREAD) buffer = new SharedArrayBuffer(TOTAL_MEMORY);
-} else {
-  if (!ENVIRONMENT_IS_PTHREAD) buffer = new ArrayBuffer(TOTAL_MEMORY);
-}
-updateGlobalBufferViews();
-
-#else
-if (!ENVIRONMENT_IS_PTHREAD) {
-#if ALLOW_MEMORY_GROWTH
-  wasmMemory = new WebAssembly.Memory({ 'initial': TOTAL_MEMORY / WASM_PAGE_SIZE , 'maximum': {{{ WASM_MEM_MAX }}} / WASM_PAGE_SIZE, 'shared': true });
-#else
-  wasmMemory = new WebAssembly.Memory({ 'initial': TOTAL_MEMORY / WASM_PAGE_SIZE , 'maximum': TOTAL_MEMORY / WASM_PAGE_SIZE, 'shared': true });
-#endif
-  buffer = wasmMemory.buffer;
-  assert(buffer instanceof SharedArrayBuffer, 'requested a shared WebAssembly.Memory but the returned buffer is not a SharedArrayBuffer, indicating that while the browser has SharedArrayBuffer it does not have WebAssembly threads support - you may need to set a flag');
-}
-
-updateGlobalBufferViews();
-#endif // !WASM
-#else // USE_PTHREADS
-
-// Use a provided buffer, if there is one, or else allocate a new one
-if (Module['buffer']) {
-  buffer = Module['buffer'];
-#if ASSERTIONS
-  assert(buffer.byteLength === TOTAL_MEMORY, 'provided buffer should be ' + TOTAL_MEMORY + ' bytes, but it is ' + buffer.byteLength);
+if (ENVIRONMENT_IS_PTHREAD) {
+#if MODULARIZE && WASM
+  // In pthreads mode the wasmMemory and others are received in an onmessage, and that
+  // onmessage then loadScripts us, sending wasmMemory etc. on Module. Here we recapture
+  // it to a local so it can be used normally.
+  wasmMemory = Module['wasmMemory'];
 #endif
 } else {
-  // Use a WebAssembly memory where available
+#endif // USE_PTHREADS
 #if WASM
-  if (typeof WebAssembly === 'object' && typeof WebAssembly.Memory === 'function') {
-#if ASSERTIONS
-    assert(TOTAL_MEMORY % WASM_PAGE_SIZE === 0);
-#endif // ASSERTIONS
+  if (Module['wasmMemory']) {
+    wasmMemory = Module['wasmMemory'];
+  } else {
+    wasmMemory = new WebAssembly.Memory({
+      'initial': INITIAL_TOTAL_MEMORY / WASM_PAGE_SIZE
 #if ALLOW_MEMORY_GROWTH
 #if WASM_MEM_MAX != -1
-#if ASSERTIONS
-    assert({{{ WASM_MEM_MAX }}} % WASM_PAGE_SIZE == 0);
+      ,
+      'maximum': {{{ WASM_MEM_MAX }}} / WASM_PAGE_SIZE
 #endif
-    wasmMemory = new WebAssembly.Memory({ 'initial': TOTAL_MEMORY / WASM_PAGE_SIZE, 'maximum': {{{ WASM_MEM_MAX }}} / WASM_PAGE_SIZE });
 #else
-    wasmMemory = new WebAssembly.Memory({ 'initial': TOTAL_MEMORY / WASM_PAGE_SIZE });
-#endif // WASM_MEM_MAX
-#else
-    wasmMemory = new WebAssembly.Memory({ 'initial': TOTAL_MEMORY / WASM_PAGE_SIZE, 'maximum': TOTAL_MEMORY / WASM_PAGE_SIZE });
+      ,
+      'maximum': INITIAL_TOTAL_MEMORY / WASM_PAGE_SIZE
 #endif // ALLOW_MEMORY_GROWTH
-    buffer = wasmMemory.buffer;
-  } else
-#endif // WASM
-  {
-    buffer = new ArrayBuffer(TOTAL_MEMORY);
+#if USE_PTHREADS
+      ,
+      'shared': true
+#endif
+    });
+#if USE_PTHREADS
+    assert(wasmMemory.buffer instanceof SharedArrayBuffer, 'requested a shared WebAssembly.Memory but the returned buffer is not a SharedArrayBuffer, indicating that while the browser has SharedArrayBuffer it does not have WebAssembly threads support - you may need to set a flag');
+#endif
   }
-#if ASSERTIONS
-  assert(buffer.byteLength === TOTAL_MEMORY);
-#endif // ASSERTIONS
-  Module['buffer'] = buffer;
-}
-updateGlobalBufferViews();
 
-#endif // USE_PTHREADS
+#else // WASM
+
+  if (Module['buffer']) {
+    buffer = Module['buffer'];
+  }
+#ifdef USE_PTHREADS
+  else if (typeof SharedArrayBuffer !== 'undefined') {
+    buffer = new SharedArrayBuffer(INITIAL_TOTAL_MEMORY);
+  }
+#endif
+  else {
+    buffer = new ArrayBuffer(INITIAL_TOTAL_MEMORY);
+  }
+#endif // WASM
+#if USE_PTHREADS
+}
+#endif
+
+#if WASM
+if (wasmMemory) {
+  buffer = wasmMemory.buffer;
+}
+#endif
+
+// If the user provides an incorrect length, just use that length instead rather than providing the user to
+// specifically provide the memory length with Module['TOTAL_MEMORY'].
+INITIAL_TOTAL_MEMORY = buffer.byteLength;
+#ifdef ASSERTIONS && WASM
+assert(INITIAL_TOTAL_MEMORY % WASM_PAGE_SIZE === 0);
+#ifdef ALLOW_MEMORY_GROWTH && WASM_MEM_MAX != -1
+assert({{{ WASM_PAGE_SIZE }}} % WASM_PAGE_SIZE === 0);
+#endif
+#endif
+updateGlobalBufferViews();
 
 #if USE_PTHREADS
 if (!ENVIRONMENT_IS_PTHREAD) { // Pthreads have already initialized these variables in src/worker.js, where they were passed to the thread worker at startup time
@@ -527,20 +500,14 @@ function preRun() {
   callRuntimeCallbacks(__ATPRERUN__);
 }
 
-function ensureInitRuntime() {
+function initRuntime() {
 #if STACK_OVERFLOW_CHECK
   checkStackCookie();
 #endif
-#if USE_PTHREADS
-  if (ENVIRONMENT_IS_PTHREAD) return; // PThreads reuse the runtime from the main thread.
+#if ASSERTIONS
+  assert(!runtimeInitialized);
 #endif
-  if (runtimeInitialized) return;
   runtimeInitialized = true;
-#if USE_PTHREADS
-  // Pass the thread address inside the asm.js scope to store it for fast access that avoids the need for a FFI out.
-  __register_pthread_ptr(PThread.mainThreadBlock, /*isMainBrowserThread=*/!ENVIRONMENT_IS_WORKER, /*isMainRuntimeThread=*/1);
-  _emscripten_register_main_browser_thread_id(PThread.mainThreadBlock);
-#endif
   {{{ getQuoted('ATINITS') }}}
   callRuntimeCallbacks(__ATINIT__);
 }
@@ -805,8 +772,9 @@ if (!ENVIRONMENT_IS_PTHREAD) addOnPreRun(function() {
 if (!ENVIRONMENT_IS_PTHREAD) addOnPreRun(function() { if (typeof SharedArrayBuffer !== 'undefined') { addRunDependency('pthreads'); PThread.allocateUnusedWorkers({{{PTHREAD_POOL_SIZE}}}, function() { removeRunDependency('pthreads'); }); }});
 #endif
 
-#if ASSERTIONS && FILESYSTEM == 0 && !ASMFS
-var /* show errors on likely calls to FS when it was not included */ FS = {
+#if ASSERTIONS && !('$FS' in addedLibraryItems) && !ASMFS
+// show errors on likely calls to FS when it was not included
+var FS = {
   error: function() {
     abort('Filesystem support (FS) was not included. The problem is that you are using files from JS, but files were not used from C/C++, so filesystem support was not auto-included. You can force-include filesystem support with  -s FORCE_FILESYSTEM=1');
   },
@@ -852,7 +820,7 @@ function getBinary() {
     if (Module['readBinary']) {
       return Module['readBinary'](wasmBinaryFile);
     } else {
-#if BINARYEN_ASYNC_COMPILATION
+#if WASM_ASYNC_COMPILATION
       throw "both async and sync fetching of the wasm failed";
 #else
       throw "sync fetching of the wasm failed: you can preload it to Module['wasmBinary'] manually, or emcc.py will do that for you when generating HTML (but not JS)";
@@ -883,9 +851,107 @@ function getBinaryPromise() {
   });
 }
 
+#if LOAD_SOURCE_MAP
+var wasmSourceMap;
+#include "source_map_support.js"
+#endif
+
+#if 'emscripten_generate_pc' in addedLibraryItems
+var wasmOffsetConverter;
+#include "wasm_offset_converter.js"
+#endif
+
 // Create the wasm instance.
 // Receives the wasm imports, returns the exports.
 function createWasm(env) {
+#if WASM2JS || AUTODEBUG
+  // wasm2js legalization of i64 support code may require these
+  // autodebug may also need them
+  env['setTempRet0'] = setTempRet0;
+  env['getTempRet0'] = getTempRet0;
+#endif
+#if AUTODEBUG
+  env['log_execution'] = function(loc) {
+    console.log('log_execution ' + loc);
+  };
+  env['get_i32'] = function(loc, index, value) {
+    console.log('get_i32 ' + [loc, index, value]);
+    return value;
+  };
+  env['get_i64'] = function(loc, index, low, high) {
+    console.log('get_i64 ' + [loc, index, low, high]);
+    env['setTempRet0'](high);
+    return low;
+  };
+  env['get_f32'] = function(loc, index, value) {
+    console.log('get_f32 ' + [loc, index, value]);
+    return value;
+  };
+  env['get_f64'] = function(loc, index, value) {
+    console.log('get_f64 ' + [loc, index, value]);
+    return value;
+  };
+  env['set_i32'] = function(loc, index, value) {
+    console.log('set_i32 ' + [loc, index, value]);
+    return value;
+  };
+  env['set_i64'] = function(loc, index, low, high) {
+    console.log('set_i64 ' + [loc, index, low, high]);
+    env['setTempRet0'](high);
+    return low;
+  };
+  env['set_f32'] = function(loc, index, value) {
+    console.log('set_f32 ' + [loc, index, value]);
+    return value;
+  };
+  env['set_f64'] = function(loc, index, value) {
+    console.log('set_f64 ' + [loc, index, value]);
+    return value;
+  };
+  env['load_ptr'] = function(loc, bytes, offset, ptr) {
+    console.log('load_ptr ' + [loc, bytes, offset, ptr]);
+    return ptr;
+  };
+  env['load_val_i32'] = function(loc, value) {
+    console.log('load_val_i32 ' + [loc, value]);
+    return value;
+  };
+  env['load_val_i64'] = function(loc, low, high) {
+    console.log('load_val_i64 ' + [loc, low, high]);
+    env['setTempRet0'](high);
+    return low;
+  };
+  env['load_val_f32'] = function(loc, value) {
+    console.log('loaload_val_i32d_ptr ' + [loc, value]);
+    return value;
+  };
+  env['load_val_f64'] = function(loc, value) {
+    console.log('load_val_f64 ' + [loc, value]);
+    return value;
+  };
+  env['store_ptr'] = function(loc, bytes, offset, ptr) {
+    console.log('store_ptr ' + [loc, bytes, offset, ptr]);
+    return ptr;
+  };
+  env['store_val_i32'] = function(loc, value) {
+    console.log('store_val_i32 ' + [loc, value]);
+    return value;
+  };
+  env['store_val_i64'] = function(loc, low, high) {
+    console.log('store_val_i64 ' + [loc, low, high]);
+    env['setTempRet0'](high);
+    return low;
+  };
+  env['store_val_f32'] = function(loc, value) {
+    console.log('loastore_val_i32d_ptr ' + [loc, value]);
+    return value;
+  };
+  env['store_val_f64'] = function(loc, value) {
+    console.log('store_val_f64 ' + [loc, value]);
+    return value;
+  };
+#endif
+
   // prepare imports
   var info = {
     'env': env
@@ -904,6 +970,9 @@ function createWasm(env) {
   // performing other necessary setup
   function receiveInstance(instance, module) {
     var exports = instance.exports;
+#if WASM_BACKEND && ASYNCIFY
+    exports = Asyncify.instrumentWasmExports(exports);
+#endif
     Module['asm'] = exports;
 #if USE_PTHREADS
     // Keep a reference to the compiled module so we can post it to the workers.
@@ -922,22 +991,15 @@ function createWasm(env) {
   addRunDependency('wasm-instantiate');
 #endif
 
-  // User shell pages can write their own Module.instantiateWasm = function(imports, successCallback) callback
-  // to manually instantiate the Wasm module themselves. This allows pages to run the instantiation parallel
-  // to any other async startup actions they are performing.
-  if (Module['instantiateWasm']) {
-    try {
-      return Module['instantiateWasm'](info, receiveInstance);
-    } catch(e) {
-      err('Module.instantiateWasm callback failed with error: ' + e);
-      return false;
-    }
-  }
+#if LOAD_SOURCE_MAP
+  addRunDependency('source-map');
 
-#if BINARYEN_ASYNC_COMPILATION
-#if RUNTIME_LOGGING
-  err('asynchronously preparing wasm');
+  function receiveSourceMapJSON(sourceMap) {
+    wasmSourceMap = new WasmSourceMap(sourceMap);
+    removeRunDependency('source-map');
+  }
 #endif
+
 #if ASSERTIONS
   // Async compilation can be confusing when an error on the page overwrites Module
   // (for example, if the order of elements is wrong, and the one defining Module is
@@ -959,45 +1021,108 @@ function createWasm(env) {
     receiveInstance(output['instance']);
 #endif
   }
+
+#if 'emscripten_generate_pc' in addedLibraryItems
+  addRunDependency('offset-converter');
+#endif
+
   function instantiateArrayBuffer(receiver) {
-    getBinaryPromise().then(function(binary) {
+    return getBinaryPromise().then(function(binary) {
+#if 'emscripten_generate_pc' in addedLibraryItems
+      wasmOffsetConverter = new WasmOffsetConverter(binary);
+      removeRunDependency('offset-converter');
+#endif
       return WebAssembly.instantiate(binary, info);
     }).then(receiver, function(reason) {
       err('failed to asynchronously prepare wasm: ' + reason);
       abort(reason);
     });
   }
+
   // Prefer streaming instantiation if available.
-  if (!Module['wasmBinary'] &&
-      typeof WebAssembly.instantiateStreaming === 'function' &&
-      !isDataURI(wasmBinaryFile) &&
-      typeof fetch === 'function') {
-    WebAssembly.instantiateStreaming(fetch(wasmBinaryFile, { credentials: 'same-origin' }), info)
-      .then(receiveInstantiatedSource, function(reason) {
-        // We expect the most common failure cause to be a bad MIME type for the binary,
-        // in which case falling back to ArrayBuffer instantiation should work.
-        err('wasm streaming compile failed: ' + reason);
-        err('falling back to ArrayBuffer instantiation');
-        instantiateArrayBuffer(receiveInstantiatedSource);
+#if WASM_ASYNC_COMPILATION
+  function instantiateAsync() {
+    if (!Module['wasmBinary'] &&
+        typeof WebAssembly.instantiateStreaming === 'function' &&
+        !isDataURI(wasmBinaryFile) &&
+        typeof fetch === 'function') {
+      fetch(wasmBinaryFile, { credentials: 'same-origin' }).then(function (response) {
+#if 'emscripten_generate_pc' in addedLibraryItems
+        // This doesn't actually do another request, it only copies the Response object.
+        // Copying lets us consume it independently of WebAssembly.instantiateStreaming.
+        response.clone().arrayBuffer().then(function (buffer) {
+          wasmOffsetConverter = new WasmOffsetConverter(new Uint8Array(buffer));
+          removeRunDependency('offset-converter');
+        });
+#endif
+        return WebAssembly.instantiateStreaming(response, info)
+          .then(receiveInstantiatedSource, function(reason) {
+            // We expect the most common failure cause to be a bad MIME type for the binary,
+            // in which case falling back to ArrayBuffer instantiation should work.
+            err('wasm streaming compile failed: ' + reason);
+            err('falling back to ArrayBuffer instantiation');
+            instantiateArrayBuffer(receiveInstantiatedSource);
+          });
       });
-  } else {
-    instantiateArrayBuffer(receiveInstantiatedSource);
+    } else {
+      return instantiateArrayBuffer(receiveInstantiatedSource);
+    }
   }
+#else
+  function instantiateSync() {
+    var instance;
+    var module;
+    var binary;
+    try {
+      binary = getBinary();
+#if 'emscripten_generate_pc' in addedLibraryItems
+      wasmOffsetConverter = new WasmOffsetConverter(binary);
+      removeRunDependency('offset-converter');
+#endif
+      module = new WebAssembly.Module(binary);
+      instance = new WebAssembly.Instance(module, info);
+    } catch (e) {
+      var str = e.toString();
+      err('failed to compile wasm module: ' + str);
+      if (str.indexOf('imported Memory') >= 0 ||
+          str.indexOf('memory import') >= 0) {
+        err('Memory size incompatibility issues may be due to changing TOTAL_MEMORY at runtime to something too large. Use ALLOW_MEMORY_GROWTH to allow any size memory (and also make sure not to set TOTAL_MEMORY at runtime to something smaller than it was at compile time).');
+      }
+      throw e;
+    }
+#if LOAD_SOURCE_MAP
+    receiveSourceMapJSON(getSourceMap());
+#endif
+    receiveInstance(instance, module);
+  }
+#endif
+  // User shell pages can write their own Module.instantiateWasm = function(imports, successCallback) callback
+  // to manually instantiate the Wasm module themselves. This allows pages to run the instantiation parallel
+  // to any other async startup actions they are performing.
+  if (Module['instantiateWasm']) {
+    try {
+      var exports = Module['instantiateWasm'](info, receiveInstance);
+#if WASM_BACKEND && ASYNCIFY
+      exports = Asyncify.instrumentWasmExports(exports);
+#endif
+      return exports;
+    } catch(e) {
+      err('Module.instantiateWasm callback failed with error: ' + e);
+      return false;
+    }
+  }
+
+#if WASM_ASYNC_COMPILATION
+#if RUNTIME_LOGGING
+  err('asynchronously preparing wasm');
+#endif
+  instantiateAsync();
+#if LOAD_SOURCE_MAP
+  getSourceMapPromise().then(receiveSourceMapJSON);
+#endif
   return {}; // no exports yet; we'll fill them in later
 #else
-  var instance;
-  var module;
-  try {
-    module = new WebAssembly.Module(getBinary());
-    instance = new WebAssembly.Instance(module, info)
-  } catch (e) {
-    err('failed to compile wasm module: ' + e);
-    if (e.toString().indexOf('imported Memory with incompatible size') >= 0) {
-      err('Memory size incompatibility issues may be due to changing TOTAL_MEMORY at runtime to something too large. Use ALLOW_MEMORY_GROWTH to allow any size memory (and also make sure not to set TOTAL_MEMORY at runtime to something smaller than it was at compile time).');
-    }
-    return false;
-  }
-  receiveInstance(instance, module);
+  instantiateSync();
   return Module['asm']; // exports were assigned here
 #endif
 }
@@ -1019,12 +1144,29 @@ Module['asm'] = function(global, env, providedBuffer) {
   env['table'] = wasmTable = new WebAssembly.Table({
     'initial': {{{ getQuoted('WASM_TABLE_SIZE') }}},
 #if !ALLOW_TABLE_GROWTH
+#if WASM_BACKEND
+    'maximum': {{{ getQuoted('WASM_TABLE_SIZE') }}} + {{{ RESERVED_FUNCTION_POINTERS }}},
+#else
     'maximum': {{{ getQuoted('WASM_TABLE_SIZE') }}},
+#endif
 #endif // WASM_BACKEND
     'element': 'anyfunc'
   });
+  // With the wasm backend __memory_base and __table_base and only needed for
+  // relocatable output.
+#if RELOCATABLE || !WASM_BACKEND
   env['__memory_base'] = {{{ GLOBAL_BASE }}}; // tell the memory segments where to place themselves
-  env['__table_base'] = 0; // table starts at 0 by default (even in dynamic linking, for the main module)
+#if WASM_BACKEND
+  env['__stack_pointer'] = STACK_BASE;
+  // We reserve slot 0 in the table for the NULL function pointer.
+  // This means the __table_base for the main module (even in dynamic linking)
+  // is always 1.
+  env['__table_base'] = 1;
+#else
+  // table starts at 0 by default (even in dynamic linking, for the main module)
+  env['__table_base'] = 0;
+#endif
+#endif
 
   var exports = createWasm(env);
 #if ASSERTIONS
@@ -1033,5 +1175,9 @@ Module['asm'] = function(global, env, providedBuffer) {
   return exports;
 };
 #endif
+
+// Globals used by JS i64 conversions
+var tempDouble;
+var tempI64;
 
 // === Body ===
